@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::io::Write;
@@ -32,75 +31,8 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 // ============================================================================
 
 /// 框架核心错误类型
-#[derive(Debug)]
-pub enum AyjxError {
-    /// 配置相关错误
-    Config(String),
-    /// IO 错误
-    Io(std::io::Error),
-    /// 序列化/反序列化错误
-    Serde(String),
-    /// 适配器错误
-    Adapter(String),
-    /// 插件错误
-    Plugin(String),
-    /// 会话超时
-    SessionTimeout,
-    /// 会话已关闭
-    SessionClosed,
-    /// 资源未找到
-    NotFound(String),
-    /// 权限不足
-    PermissionDenied(String),
-    /// 内部错误
-    Internal(String),
-}
+pub type AyjxError = Box<dyn std::error::Error + Send + Sync>;
 
-impl fmt::Display for AyjxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(msg) => write!(f, "Config error: {}", msg),
-            Self::Io(err) => write!(f, "IO error: {}", err),
-            Self::Serde(msg) => write!(f, "Serialization error: {}", msg),
-            Self::Adapter(msg) => write!(f, "Adapter error: {}", msg),
-            Self::Plugin(msg) => write!(f, "Plugin error: {}", msg),
-            Self::SessionTimeout => write!(f, "Session timeout"),
-            Self::SessionClosed => write!(f, "Session closed"),
-            Self::NotFound(msg) => write!(f, "Not found: {}", msg),
-            Self::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
-            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for AyjxError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for AyjxError {
-    fn from(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<toml::de::Error> for AyjxError {
-    fn from(err: toml::de::Error) -> Self {
-        Self::Serde(err.to_string())
-    }
-}
-
-impl From<toml::ser::Error> for AyjxError {
-    fn from(err: toml::ser::Error) -> Self {
-        Self::Serde(err.to_string())
-    }
-}
-
-/// 框架结果类型别名
 pub type AyjxResult<T> = Result<T, AyjxError>;
 
 // ============================================================================
@@ -1722,9 +1654,18 @@ pub mod message_elements {
                 | Element::Unknown { children: c, .. } => {
                     result.push_str(&to_plain_text(c));
                 }
-                Element::Message { children: c, .. } => {
-                    // 消息元素通常用于合并转发，每条消息单独成段
+                Element::Message {
+                    forward,
+                    children: c,
+                    ..
+                } => {
+                    // 如果是转发引用且没有子节点（例如 <message forward id="..."/>），显示占位符
+                    if *forward && c.is_empty() {
+                        result.push_str("[合并转发]");
+                    }
+                    // 递归处理内容
                     result.push_str(&to_plain_text(c));
+                    // 消息节点通常意味着换行
                     result.push('\n');
                 }
                 Element::Code(text) => result.push_str(text),
@@ -2002,13 +1943,13 @@ pub mod message_elements {
 // ============================================================================
 
 /// 指令解析工具库
-/// 框架核心不再强制约定“什么是指令”，而是提供此工具库供开发者组合使用。
 pub mod command {
     use super::message_elements::Element;
 
     /// 尝试匹配并剥离前缀
     ///
     /// 遍历 `prefixes` 列表，如果 `content` 以其中任意一个开头，则返回匹配到的前缀。
+    /// 开发者可以使用此函数判断消息是否为指令。
     pub fn match_prefix(content: &str, prefixes: &[String]) -> Option<String> {
         let trimmed = content.trim_start();
         for prefix in prefixes {
@@ -2019,113 +1960,9 @@ pub mod command {
         None
     }
 
-    /// 从文本中剥离前缀
-    ///
-    /// 返回去除前缀后的剩余部分（会去除前缀后的首部空格）。
-    /// 如果不匹配，返回 None。
-    pub fn strip_prefix<'a>(content: &'a str, prefix: &str) -> Option<&'a str> {
-        let trimmed = content.trim_start();
-        if let Some(stripped) = trimmed.strip_prefix(prefix) {
-            Some(stripped.trim_start())
-        } else {
-            None
-        }
-    }
-
-    /// 提取指令关键字
-    ///
-    /// 获取字符串的第一个单词作为关键字，并返回剩余部分。
-    /// 返回 `(keyword, remaining)`
-    pub fn split_keyword(content: &str) -> Option<(&str, &str)> {
-        let trimmed = content.trim_start();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        match trimmed.split_once(char::is_whitespace) {
-            Some((head, tail)) => Some((head, tail.trim_start())),
-            None => Some((trimmed, "")),
-        }
-    }
-
-    /// 简单的参数分割
-    ///
-    /// 仅按空白字符分割字符串。
-    pub fn split_args(content: &str) -> Vec<&str> {
-        content.split_whitespace().collect()
-    }
-
-    /// 支持引号的参数分割 (Shell 风格)
-    ///
-    /// 支持双引号 `"` 和单引号 `'` 包裹参数，支持转义字符 `\`。
-    /// 例如: `/echo "hello world"` 会被解析为 `["hello world"]` 而不是 `["\"hello", "world\""]`。
-    pub fn parse_shell_args(content: &str) -> Result<Vec<String>, String> {
-        let mut args = Vec::new();
-        let mut current_arg = String::new();
-        let mut in_quote = None; // None, Some('"'), Some('\'')
-        let mut escape = false;
-        let mut chars = content.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if escape {
-                current_arg.push(c);
-                escape = false;
-                continue;
-            }
-
-            if c == '\\' {
-                if let Some(quote_char) = in_quote {
-                    // 在引号内，只有引号本身或反斜杠需要转义
-                    if let Some(&next_c) = chars.peek()
-                        && (next_c == quote_char || next_c == '\\')
-                    {
-                        escape = true;
-                        continue;
-                    }
-                } else {
-                    // 在引号外，反斜杠总是转义下一个字符
-                    escape = true;
-                    continue;
-                }
-            }
-
-            match c {
-                '"' | '\'' => {
-                    if let Some(quote_char) = in_quote {
-                        if c == quote_char {
-                            in_quote = None; // 结束引号
-                        } else {
-                            current_arg.push(c); // 引号内的另一种引号视为普通字符
-                        }
-                    } else {
-                        in_quote = Some(c); // 开始引号
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if in_quote.is_some() {
-                        current_arg.push(c);
-                    } else if !current_arg.is_empty() {
-                        args.push(current_arg);
-                        current_arg = String::new();
-                    }
-                }
-                _ => current_arg.push(c),
-            }
-        }
-
-        if in_quote.is_some() {
-            return Err("Unclosed quote".to_string());
-        }
-
-        if !current_arg.is_empty() {
-            args.push(current_arg);
-        }
-
-        Ok(args)
-    }
-
     /// 工具：跳过消息开头的引用(Quote)元素
     ///
+    /// 在处理回复消息时，通常需要忽略引用的部分，只解析用户新输入的内容。
     /// 返回跳过引用后的元素切片。
     pub fn skip_quote_elements(elements: &[Element]) -> &[Element] {
         let mut start = 0;
@@ -2141,7 +1978,7 @@ pub mod command {
 
     /// 工具：查找第一个纯文本元素的内容
     ///
-    /// 常用于获取指令主体。
+    /// 常用于获取指令主体。例如从 `[Quote] /echo hello` 中提取 `/echo hello`。
     pub fn find_first_text(elements: &[Element]) -> Option<&str> {
         elements.iter().find_map(|e| e.as_text())
     }
@@ -2165,9 +2002,6 @@ pub struct AppConfig {
 /// 核心配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// 日志级别
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
     /// 指令前缀
     #[serde(default = "default_cmd_prefix")]
     pub cmd_prefix: Vec<String>,
@@ -2185,10 +2019,6 @@ pub struct CoreConfig {
     pub session_timeout_secs: u64,
 }
 
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 fn default_cmd_prefix() -> Vec<String> {
     vec!["/".to_string(), ".".to_string()]
 }
@@ -2200,7 +2030,6 @@ fn default_session_timeout() -> u64 {
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            log_level: default_log_level(),
             cmd_prefix: default_cmd_prefix(),
             admin_users: Vec::new(),
             blacklist_users: Vec::new(),
@@ -2278,6 +2107,7 @@ impl ConfigManager {
         let tmp_clone = tmp_path.clone();
 
         // 在阻塞线程中执行同步 IO
+        // 移除内部错误包装，直接传递错误
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             // 确保父目录存在
             if let Some(parent) = path_clone.parent() {
@@ -2290,8 +2120,7 @@ impl ConfigManager {
             fs::rename(&tmp_clone, &path_clone)?;
             Ok(())
         })
-        .await
-        .map_err(|e| AyjxError::Internal(e.to_string()))??;
+        .await??;
 
         // 更新内存缓存
         let mut write_lock = self.config.write().await;
@@ -2441,6 +2270,10 @@ pub trait Adapter: Send + Sync + 'static {
     /// 适配器名称
     fn name(&self) -> &str;
 
+    fn default_config(&self) -> Option<toml::Value> {
+        None
+    }
+
     /// 适配器版本
     fn version(&self) -> &str {
         "0.1.0"
@@ -2465,12 +2298,12 @@ pub trait Adapter: Send + Sync + 'static {
 
     /// 获取消息
     async fn get_message(&self, channel_id: &str, message_id: &str) -> AyjxResult<Message> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 撤回消息
     async fn delete_message(&self, channel_id: &str, message_id: &str) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 编辑消息
@@ -2480,7 +2313,7 @@ pub trait Adapter: Send + Sync + 'static {
         message_id: &str,
         content: &str,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取消息列表
@@ -2490,19 +2323,19 @@ pub trait Adapter: Send + Sync + 'static {
         next: Option<&str>,
         limit: Option<usize>,
     ) -> AyjxResult<BidiPagedList<Message>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 用户相关 -----
 
     /// 获取用户信息
     async fn get_user(&self, user_id: &str) -> AyjxResult<User> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取好友列表
     async fn list_friends(&self, next: Option<&str>) -> AyjxResult<PagedList<User>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 处理好友申请
@@ -2512,14 +2345,14 @@ pub trait Adapter: Send + Sync + 'static {
         approve: bool,
         comment: Option<&str>,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 频道相关 -----
 
     /// 获取频道信息
     async fn get_channel(&self, channel_id: &str) -> AyjxResult<Channel> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取频道列表
@@ -2528,27 +2361,27 @@ pub trait Adapter: Send + Sync + 'static {
         guild_id: &str,
         next: Option<&str>,
     ) -> AyjxResult<PagedList<Channel>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 创建群组频道
     async fn create_channel(&self, guild_id: &str, data: &Channel) -> AyjxResult<Channel> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 修改群组频道
     async fn update_channel(&self, channel_id: &str, data: &Channel) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 删除群组频道
     async fn delete_channel(&self, channel_id: &str) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 禁言群组频道 (实验性)
     async fn mute_channel(&self, channel_id: &str, duration_ms: u64) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 创建私聊频道
@@ -2557,19 +2390,19 @@ pub trait Adapter: Send + Sync + 'static {
         user_id: &str,
         guild_id: Option<&str>,
     ) -> AyjxResult<Channel> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 群组相关 -----
 
     /// 获取群组信息
     async fn get_guild(&self, guild_id: &str) -> AyjxResult<Guild> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取群组列表
     async fn list_guilds(&self, next: Option<&str>) -> AyjxResult<PagedList<Guild>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 处理群组邀请
@@ -2579,14 +2412,14 @@ pub trait Adapter: Send + Sync + 'static {
         approve: bool,
         comment: Option<&str>,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 群组成员相关 -----
 
     /// 获取群组成员
     async fn get_guild_member(&self, guild_id: &str, user_id: &str) -> AyjxResult<GuildMember> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取群组成员列表
@@ -2595,7 +2428,7 @@ pub trait Adapter: Send + Sync + 'static {
         guild_id: &str,
         next: Option<&str>,
     ) -> AyjxResult<PagedList<GuildMember>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 踢出群组成员
@@ -2605,7 +2438,7 @@ pub trait Adapter: Send + Sync + 'static {
         user_id: &str,
         permanent: bool,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 禁言群组成员
@@ -2615,7 +2448,7 @@ pub trait Adapter: Send + Sync + 'static {
         user_id: &str,
         duration_ms: u64,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 处理群组成员申请
@@ -2625,13 +2458,13 @@ pub trait Adapter: Send + Sync + 'static {
         approve: bool,
         comment: Option<&str>,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 群组角色相关 -----
     /// 获取群组角色
     async fn get_guild_role(&self, guild_id: &str, role_id: &str) -> AyjxResult<GuildRole> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取群组角色列表
@@ -2640,12 +2473,12 @@ pub trait Adapter: Send + Sync + 'static {
         guild_id: &str,
         next: Option<&str>,
     ) -> AyjxResult<PagedList<GuildRole>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 创建群组角色
     async fn create_guild_role(&self, guild_id: &str, role: &GuildRole) -> AyjxResult<GuildRole> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 修改群组角色
@@ -2655,12 +2488,12 @@ pub trait Adapter: Send + Sync + 'static {
         role_id: &str,
         role: &GuildRole,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 删除群组角色
     async fn delete_guild_role(&self, guild_id: &str, role_id: &str) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 设置群组成员角色
@@ -2670,7 +2503,7 @@ pub trait Adapter: Send + Sync + 'static {
         user_id: &str,
         role_id: &str,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 取消群组成员角色
@@ -2680,7 +2513,7 @@ pub trait Adapter: Send + Sync + 'static {
         user_id: &str,
         role_id: &str,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     // ----- Satori API: 表态相关 -----
@@ -2692,7 +2525,7 @@ pub trait Adapter: Send + Sync + 'static {
         message_id: &str,
         emoji: &str,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 删除表态
@@ -2703,7 +2536,7 @@ pub trait Adapter: Send + Sync + 'static {
         emoji: &str,
         user_id: Option<&str>,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 清除表态
@@ -2713,7 +2546,7 @@ pub trait Adapter: Send + Sync + 'static {
         message_id: &str,
         emoji: Option<&str>,
     ) -> AyjxResult<()> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 
     /// 获取表态列表
@@ -2724,7 +2557,7 @@ pub trait Adapter: Send + Sync + 'static {
         emoji: &str,
         next: Option<&str>,
     ) -> AyjxResult<PagedList<User>> {
-        Err(AyjxError::NotFound("API not implemented".to_string()))
+        Err("API not implemented".into())
     }
 }
 
@@ -2763,6 +2596,10 @@ pub trait Plugin: Send + Sync {
     /// 插件描述
     fn description(&self) -> &str {
         ""
+    }
+
+    fn default_config(&self) -> Option<toml::Value> {
+        None
     }
 
     /// 插件版本
@@ -2898,10 +2735,7 @@ impl PluginContext {
         if let Some(adapter) = adapters.get(adapter_id) {
             adapter.send_message(channel_id, content).await
         } else {
-            Err(AyjxError::NotFound(format!(
-                "Adapter {} not found",
-                adapter_id
-            )))
+            Err(format!("Adapter {} not found", adapter_id).into())
         }
     }
 
@@ -2909,10 +2743,10 @@ impl PluginContext {
     pub async fn reply(&self, event: &Event, content: &str) -> AyjxResult<Vec<Message>> {
         let adapter_id = event
             .adapter()
-            .ok_or_else(|| AyjxError::Internal("Event has no adapter info".to_string()))?;
+            .ok_or_else(|| "Event has no adapter info".to_string())?;
         let channel_id = event
             .channel_id()
-            .ok_or_else(|| AyjxError::Internal("Event has no channel info".to_string()))?;
+            .ok_or_else(|| "Event has no channel info".to_string())?;
 
         self.send_message(adapter_id, channel_id, content).await
     }
@@ -2939,8 +2773,8 @@ impl PluginContext {
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(event)) => Ok(event),
-            Ok(Err(_)) => Err(AyjxError::SessionClosed),
-            Err(_) => Err(AyjxError::SessionTimeout),
+            Ok(Err(_)) => Err("Session closed".into()),
+            Err(_) => Err("Session timeout".into()),
         }
     }
 
@@ -2966,10 +2800,8 @@ impl PluginContext {
         event
             .content()
             .map(|s| s.to_string())
-            .ok_or_else(|| AyjxError::Internal("Event has no message content".to_string()))
+            .ok_or_else(|| "Event has no message content".into())
     }
-
-    // [删除] command_parser() - 框架核心不再提供强制的指令解析器
 
     /// 获取用户信息（便捷方法）
     pub async fn get_user(&self, adapter_id: &str, user_id: &str) -> AyjxResult<User> {
@@ -2977,10 +2809,7 @@ impl PluginContext {
         if let Some(adapter) = adapters.get(adapter_id) {
             adapter.get_user(user_id).await
         } else {
-            Err(AyjxError::NotFound(format!(
-                "Adapter {} not found",
-                adapter_id
-            )))
+            Err(format!("Adapter {} not found", adapter_id).into())
         }
     }
 
@@ -3022,28 +2851,35 @@ impl PluginContext {
         let _ = self.inner.system_tx.send(SystemSignal::ConfigReload);
     }
 
-    /// 启用指定插件
+    // 修改 enable_plugin
     pub async fn enable_plugin(&self, plugin_id: &str) -> bool {
-        let mut plugins = self.inner.plugins.write().await;
-        if let Some(slot) = plugins.iter_mut().find(|p| p.plugin.id() == plugin_id)
-            && !slot.enabled
-        {
-            slot.enabled = true;
-            ayjx_info!("[Ayjx] 插件 {} 已启用", slot.plugin.name());
-            return true;
+        // 这里只需要读锁，因为我们要修改的是 Arc 内部的 AtomicBool，而不是 Vec 结构本身
+        let plugins = self.inner.plugins.read().await;
+
+        if let Some(slot) = plugins.iter().find(|p| p.plugin.id() == plugin_id) {
+            // 检查当前状态 (load)
+            if !slot.enabled.load(Ordering::SeqCst) {
+                // 修改状态 (store)
+                slot.enabled.store(true, Ordering::SeqCst);
+                println!("[Ayjx] 插件 {} 已启用", slot.plugin.name());
+                return true;
+            }
         }
         false
     }
 
-    /// 禁用指定插件
+    // 修改 disable_plugin
     pub async fn disable_plugin(&self, plugin_id: &str) -> bool {
-        let mut plugins = self.inner.plugins.write().await;
-        if let Some(slot) = plugins.iter_mut().find(|p| p.plugin.id() == plugin_id)
-            && slot.enabled
-        {
-            slot.enabled = false;
-            ayjx_info!("[Ayjx] 插件 {} 已禁用", slot.plugin.name());
-            return true;
+        let plugins = self.inner.plugins.read().await;
+
+        if let Some(slot) = plugins.iter().find(|p| p.plugin.id() == plugin_id) {
+            // 检查当前状态
+            if slot.enabled.load(Ordering::SeqCst) {
+                // 修改状态
+                slot.enabled.store(false, Ordering::SeqCst);
+                println!("[Ayjx] 插件 {} 已禁用", slot.plugin.name());
+                return true;
+            }
         }
         false
     }
@@ -3120,9 +2956,10 @@ pub enum SystemSignal {
 // ============================================================================
 
 /// 插件容器，包含插件实例和状态
+#[derive(Clone)]
 struct PluginSlot {
-    plugin: Box<dyn Plugin>,
-    enabled: bool,
+    plugin: Arc<dyn Plugin>,
+    enabled: Arc<AtomicBool>,
 }
 
 /// 框架内部状态 (用于并发共享)
@@ -3247,8 +3084,8 @@ impl Ayjx {
         let mut plugin_slots = Vec::new();
         for p in raw_plugins {
             plugin_slots.push(PluginSlot {
-                plugin: p,
-                enabled: true, // 默认启用
+                plugin: Arc::from(p),
+                enabled: Arc::new(AtomicBool::new(true)),
             });
         }
 
@@ -3288,34 +3125,76 @@ impl Ayjx {
         self.inner.running.store(true, Ordering::SeqCst);
 
         // 1. 加载配置
-        ayjx_info!("[Ayjx] 正在加载配置...");
-        let cfg = self.inner.config.load().await?;
-        ayjx_info!("[Ayjx] 配置加载完成，日志级别: {}", cfg.core.log_level);
+        println!("[Ayjx] 正在加载配置...");
+        // 这里我们需要先加载一次，获取当前磁盘上的状态
+        let mut initial_config = self.inner.config.load().await?;
+        let mut config_modified = false;
 
-        // 2. 确保数据目录存在
-        tokio::fs::create_dir_all(&self.inner.data_dir).await?;
-        ayjx_info!("[Ayjx] 数据目录: {}", self.inner.data_dir.display());
+        // [新增] 1.5 配置自动注册与合并
+        // 检查所有插件，如果配置中不存在该插件的块，则写入默认配置
+        println!("[Ayjx] 正在检查配置完整性...");
 
-        // 3. 初始化插件
-        ayjx_info!("[Ayjx] 正在初始化插件...");
+        // 检查插件配置
         {
             let plugins = self.inner.plugins.read().await;
             for slot in plugins.iter() {
-                if !slot.enabled {
+                let pid = slot.plugin.id();
+                // 如果配置中没有这个插件的 key，且插件提供了默认配置
+                if !initial_config.plugins.contains_key(pid)
+                    && let Some(def_cfg) = slot.plugin.default_config() {
+                        println!("[Ayjx]   + 初始化插件配置: {}", slot.plugin.name());
+                        initial_config.plugins.insert(pid.to_string(), def_cfg);
+                        config_modified = true;
+                    }
+            }
+        }
+
+        // 检查适配器配置 (逻辑同上，适配器通常也存放在 plugins 字典或单独字段，这里为了统一暂存入 plugins)
+        // 注意：如果你希望适配器配置单独存放（如 [adapters.qq]），需修改 AppConfig 结构。
+        // 这里假设适配器配置也混入 plugins 结构或你需要扩展 AppConfig。
+        // 为了演示，我们暂时将其视为一种"组件配置"，同样存入 config.plugins (因为 AppConfig 只有 plugins 字段支持动态 Map)
+        {
+            let adapters = self.inner.adapters.read().await;
+            for (id, adapter) in adapters.iter() {
+                if !initial_config.plugins.contains_key(id)
+                    && let Some(def_cfg) = adapter.default_config() {
+                        println!("[Ayjx]   + 初始化适配器配置: {}", adapter.name());
+                        initial_config.plugins.insert(id.to_string(), def_cfg);
+                        config_modified = true;
+                    }
+            }
+        }
+
+        // 如果配置有更新，原子落盘
+        if config_modified {
+            println!("[Ayjx] 检测到新组件，正在更新配置文件...");
+            self.inner.config.save_atomic(&initial_config).await?;
+        }
+
+        // 2. 确保数据目录存在
+        tokio::fs::create_dir_all(&self.inner.data_dir).await?;
+        println!("[Ayjx] 数据目录: {}", self.inner.data_dir.display());
+
+        // 3. 初始化插件
+        println!("[Ayjx] 正在初始化插件...");
+        {
+            let plugins = self.inner.plugins.read().await;
+            for slot in plugins.iter() {
+                if !slot.enabled.load(Ordering::SeqCst) {
                     continue;
                 }
                 let plugin = &slot.plugin;
                 let ctx = self.create_plugin_context(plugin.id());
                 if let Err(e) = plugin.on_load(&ctx).await {
-                    ayjx_error!("[Ayjx] 插件 {} 初始化失败: {}", plugin.name(), e);
+                    eprintln!("[Ayjx] 插件 {} 初始化失败: {}", plugin.name(), e);
                 } else {
-                    ayjx_info!("[Ayjx]   - {} v{} 已加载", plugin.name(), plugin.version());
+                    println!("[Ayjx]   - {} v{} 已加载", plugin.name(), plugin.version());
                 }
             }
         }
 
         // 4. 启动适配器
-        ayjx_info!("[Ayjx] 正在启动适配器...");
+        println!("[Ayjx] 正在启动适配器...");
         let adapters = self.inner.adapters.read().await;
         for (id, adapter) in adapters.iter() {
             let adapter_clone = adapter.clone();
@@ -3336,16 +3215,16 @@ impl Ayjx {
                 };
 
                 if let Err(e) = adapter_clone.start(ctx).await {
-                    ayjx_error!("[Ayjx] 适配器 {} 运行错误: {}", id_clone, e);
+                    eprintln!("[Ayjx] 适配器 {} 运行错误: {}", id_clone, e);
                 }
             });
 
-            ayjx_info!("[Ayjx]   - {} ({}) 已启动", adapter_name, id);
+            println!("[Ayjx]   - {} ({}) 已启动", adapter_name, id);
         }
         drop(adapters);
 
         // 5. 进入事件循环
-        ayjx_info!("[Ayjx] 事件循环已启动，等待消息...");
+        println!("[Ayjx] 事件循环已启动，等待消息...");
 
         let mut event_rx = self.event_rx.take().expect("event_rx already taken");
         let mut system_rx = self.inner.system_tx.subscribe();
@@ -3357,27 +3236,27 @@ impl Ayjx {
                 Ok(signal) = system_rx.recv() => {
                     match signal {
                         SystemSignal::Shutdown => {
-                            ayjx_info!("[Ayjx] 收到关闭信号，正在停止...");
+                            println!("[Ayjx] 收到关闭信号，正在停止...");
                             break;
                         }
                         SystemSignal::Restart => {
-                            ayjx_info!("[Ayjx] 收到重启信号，正在准备重启...");
+                            println!("[Ayjx] 收到重启信号，正在准备重启...");
                             restart_requested = true;
                             break;
                         }
                         SystemSignal::ConfigReload => {
-                            ayjx_info!("[Ayjx] 重新加载配置...");
+                            println!("[Ayjx] 重新加载配置...");
                             if let Ok(new_cfg) = self.inner.config.load().await {
                                 let plugins = self.inner.plugins.read().await;
                                 for slot in plugins.iter() {
-                                    if !slot.enabled { continue; }
+                                    if !slot.enabled.load(Ordering::SeqCst) { continue; }
                                     let ctx = self.create_plugin_context(slot.plugin.id());
                                     let _ = slot.plugin.on_config_reload(&ctx, &new_cfg).await;
                                 }
                             }
                         }
                         SystemSignal::AdapterStatusChanged { adapter_id, status } => {
-                            ayjx_info!("[Ayjx] 适配器 {} 状态变化: {:?}", adapter_id, status);
+                            println!("[Ayjx] 适配器 {} 状态变化: {:?}", adapter_id, status);
                         }
                     }
                 }
@@ -3387,7 +3266,7 @@ impl Ayjx {
                     let inner = self.inner.clone();
                     tokio::spawn(async move {
                         if let Err(e) = inner.process_event(event).await {
-                            ayjx_error!("[Ayjx] 事件处理错误: {}", e);
+                            eprintln!("[Ayjx] 事件处理错误: {}", e);
                         }
                     });
                 }
@@ -3405,10 +3284,10 @@ impl Ayjx {
         self.shutdown().await?;
 
         if restart_requested {
-            ayjx_info!("[Ayjx] 框架已停止，请由外部进程进行重启操作。");
+            println!("[Ayjx] 框架已停止，请由外部进程进行重启操作。");
             // 这里返回 Ok，外部程序（如 main 函数中的 loop）可以根据需要重新调用 run 或退出
         } else {
-            ayjx_info!("[Ayjx] 框架已停止");
+            println!("[Ayjx] 框架已停止");
         }
 
         Ok(())
@@ -3427,19 +3306,15 @@ impl Ayjx {
         let adapters = self.inner.adapters.read().await;
         for (id, adapter) in adapters.iter() {
             if let Err(e) = adapter.stop().await {
-                ayjx_error!("[Ayjx] 停止适配器 {} 时发生错误: {}", id, e);
+                eprintln!("[Ayjx] 停止适配器 {} 时发生错误: {}", id, e);
             }
         }
 
         // 卸载所有插件 (包括调用同步的 cleanup)
         let plugins = self.inner.plugins.read().await;
         for slot in plugins.iter() {
-            if slot.enabled {
-                let ctx = self.create_plugin_context(slot.plugin.id());
-                // 先调用异步卸载
-                if let Err(e) = slot.plugin.on_unload(&ctx).await {
-                    ayjx_error!("[Ayjx] 卸载插件 {} 时发生错误: {}", slot.plugin.name(), e);
-                }
+            if !slot.enabled.load(Ordering::SeqCst) {
+                continue;
             }
             // 无论是否启用，或者异步卸载是否成功，都调用 cleanup 进行最终清理
             // 修复：使用 cleanup 代替 drop 以避免 E0040 错误
@@ -3454,11 +3329,7 @@ impl Ayjx {
 
     /// 注入事件（用于测试或外部触发）
     pub async fn inject_event(&self, event: Event) -> AyjxResult<()> {
-        self.inner
-            .event_tx
-            .send(event)
-            .await
-            .map_err(|e| AyjxError::Internal(e.to_string()))
+        self.inner.event_tx.send(event).await.map_err(|e| e.into())
     }
 }
 
@@ -3491,17 +3362,26 @@ impl AyjxInner {
         }
 
         // 3. 分发给插件
-        let plugins = self.plugins.read().await;
-        for slot in plugins.iter() {
-            if !slot.enabled {
+        // 关键优化：获取快照，避免在执行插件逻辑时持有锁
+        let slots: Vec<PluginSlot> = {
+            let guard = self.plugins.read().await;
+            guard.clone() // <--- 现在 PluginSlot 实现了 Clone，这里可以工作了
+        }; // 读锁在这里释放，防止死锁
+
+        for slot in slots {
+            // 使用 load 检查状态
+            if !slot.enabled.load(Ordering::SeqCst) {
                 continue;
             }
+
             let ctx = self.create_plugin_context(slot.plugin.id());
+
+            // 现在调用 await 是安全的
             match slot.plugin.on_event(&ctx, &event).await {
                 Ok(EventResult::Stop) => break,
                 Ok(EventResult::Continue) => continue,
                 Err(e) => {
-                    ayjx_error!(
+                    eprintln!(
                         "[Ayjx] 插件 {} 处理事件时发生错误: {}",
                         slot.plugin.name(),
                         e
@@ -3528,56 +3408,12 @@ impl AyjxInner {
 
     /// 注入事件（用于测试或外部触发）
     pub async fn inject_event(&self, event: Event) -> AyjxResult<()> {
-        self.event_tx
-            .send(event)
-            .await
-            .map_err(|e| AyjxError::Internal(e.to_string()))
+        self.event_tx.send(event).await.map_err(|e| e.into())
     }
 }
 
 // ============================================================================
-// 11. Utility Functions (工具函数)
-// ============================================================================
-
-/// 日志辅助宏
-#[macro_export]
-macro_rules! ayjx_log {
-    ($level:expr, $fmt:expr $(, $($arg:tt)+)?) => {{
-        let now = chrono::Local::now();
-        println!("[{}] [{}] {}", now.format("%Y-%m-%d %H:%M:%S"), $level, format!($fmt $(, $($arg)+)?));
-    }};
-}
-
-#[macro_export]
-macro_rules! ayjx_info {
-    ($($arg:tt)*) => {
-        $crate::ayjx_log!("INFO", $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! ayjx_warn {
-    ($($arg:tt)*) => {
-        $crate::ayjx_log!("WARN", $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! ayjx_error {
-    ($($arg:tt)*) => {
-        $crate::ayjx_log!("ERROR", $($arg)*)
-    };
-}
-
-#[macro_export]
-macro_rules! ayjx_debug {
-    ($($arg:tt)*) => {
-        $crate::ayjx_log!("DEBUG", $($arg)*)
-    };
-}
-
-// ============================================================================
-// 12. Re-exports (重新导出)
+// 11. Re-exports (重新导出)
 // ============================================================================
 
 pub mod prelude {
@@ -3615,6 +3451,6 @@ pub mod prelude {
     // 7. 外部依赖
     pub use async_trait::async_trait;
 
-    // 8. 日志宏
-    pub use super::{ayjx_debug, ayjx_error, ayjx_info, ayjx_log, ayjx_warn};
+    // 导出 toml 供插件序列化配置使用
+    pub use toml;
 }

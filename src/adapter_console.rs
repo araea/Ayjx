@@ -37,11 +37,11 @@ impl Adapter for ConsoleAdapter {
     }
 
     async fn start(&self, ctx: AdapterContext) -> AyjxResult<()> {
-        ayjx_info!("--------------------------------------------------");
-        ayjx_info!("[Console] 控制台适配器已启动。");
-        ayjx_info!("[Console] 输入 /exit 退出程序");
-        ayjx_info!("[Console] 尝试输入 /echo hello 或 /survey 开始体验");
-        ayjx_info!("--------------------------------------------------");
+        println!("--------------------------------------------------");
+        println!("[Console] 控制台适配器已启动。");
+        println!("[Console] 输入 /exit 退出程序");
+        println!("[Console] 尝试输入 /echo hello 或 /survey 开始体验");
+        println!("--------------------------------------------------");
 
         let mock_user = User {
             id: "console_user".to_string(),
@@ -72,7 +72,7 @@ impl Adapter for ConsoleAdapter {
             loop {
                 tokio::select! {
                     Ok(SystemSignal::Shutdown) = sys_rx.recv() => {
-                        ayjx_info!("ConsoleAdapter 停止输入监听");
+                        println!("ConsoleAdapter 停止输入监听");
                         break;
                     }
                     line_result = reader.next_line() => {
@@ -82,7 +82,7 @@ impl Adapter for ConsoleAdapter {
                                 if content.is_empty() { continue; }
 
                                 if content == "/exit" {
-                                    ayjx_info!("正在退出...");
+                                    println!("正在退出...");
                                     std::process::exit(0);
                                 }
 
@@ -98,13 +98,13 @@ impl Adapter for ConsoleAdapter {
                                 event.login = Some(login);
 
                                 if let Err(e) = event_tx.send(event).await {
-                                    ayjx_error!("发送事件失败: {}", e);
+                                    eprintln!("发送事件失败: {}", e);
                                     break;
                                 }
                             }
                             Ok(None) => break,
                             Err(e) => {
-                                ayjx_error!("读取输入错误: {}", e);
+                                eprintln!("读取输入错误: {}", e);
                                 break;
                             }
                         }
@@ -117,7 +117,7 @@ impl Adapter for ConsoleAdapter {
     }
 
     async fn stop(&self) -> AyjxResult<()> {
-        ayjx_info!("控制台适配器已关闭");
+        println!("控制台适配器已关闭");
         Ok(())
     }
 

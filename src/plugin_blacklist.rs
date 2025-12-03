@@ -31,25 +31,27 @@ impl Plugin for BlacklistPlugin {
 
         // 1. 检查发送者是否在黑名单中
         if let Some(user_id) = event.sender_id()
-            && cfg.is_user_blacklisted(user_id) {
-                ayjx_debug!(
-                    "[Blacklist] 拦截了黑名单用户 {} 的事件 (type: {})",
-                    user_id,
-                    event.event_type
-                );
-                return Ok(EventResult::Stop);
-            }
+            && cfg.is_user_blacklisted(user_id)
+        {
+            println!(
+                "[Blacklist] 拦截了黑名单用户 {} 的事件 (type: {})",
+                user_id,
+                event.event_type
+            );
+            return Ok(EventResult::Stop);
+        }
 
         // 2. 检查群组是否在黑名单中
         if let Some(guild_id) = event.guild_id()
-            && cfg.is_guild_blacklisted(guild_id) {
-                ayjx_debug!(
-                    "[Blacklist] 拦截了黑名单群组 {} 的事件 (type: {})",
-                    guild_id,
-                    event.event_type
-                );
-                return Ok(EventResult::Stop);
-            }
+            && cfg.is_guild_blacklisted(guild_id)
+        {
+            println!(
+                "[Blacklist] 拦截了黑名单群组 {} 的事件 (type: {})",
+                guild_id,
+                event.event_type
+            );
+            return Ok(EventResult::Stop);
+        }
 
         // 未命中黑名单，继续传递事件
         Ok(EventResult::Continue)

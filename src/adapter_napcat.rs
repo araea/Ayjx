@@ -6,7 +6,7 @@
 
 use ayjx::prelude::*;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,13 +24,13 @@ pub use api::NapCatApi;
 // 1. 配置定义
 // ============================================================================
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct NapCatConfig {
     #[serde(default)]
     pub bots: Vec<BotConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "protocol", rename_all = "kebab-case")]
 pub enum BotConfig {
     /// 正向 WebSocket
@@ -89,14 +89,14 @@ impl AdapterInner {
     async fn register_connection(&self, self_id: String, sender: BotSender) {
         let mut map = self.connections.write().await;
         map.insert(self_id.clone(), sender);
-        ayjx_info!("[NapCat] Bot {} 已连接", self_id);
-        ayjx_info!("--------------------------------------------------");
+        println!("[NapCat] Bot {} 已连接", self_id);
+        println!("--------------------------------------------------");
     }
 
     async fn remove_connection(&self, self_id: &str) {
         let mut map = self.connections.write().await;
         if map.remove(self_id).is_some() {
-            ayjx_info!("[NapCat] Bot {} 已断开", self_id);
+            println!("[NapCat] Bot {} 已断开", self_id);
         }
     }
 }
@@ -146,7 +146,7 @@ impl NapCatAdapter {
                 map.values().next().cloned()
             }
         }
-        .ok_or_else(|| AyjxError::Adapter("No active bot connection".into()))?;
+        .ok_or_else(|| "No active bot connection".to_string())?;
 
         match sender {
             BotSender::Http {
@@ -163,12 +163,12 @@ impl NapCatAdapter {
                 let resp = req
                     .send()
                     .await
-                    .map_err(|e| AyjxError::Io(std::io::Error::other(e)))?;
+                    .map_err(|e: reqwest::Error| e.to_string())?;
 
                 let json: Value = resp
                     .json()
                     .await
-                    .map_err(|e| AyjxError::Serde(e.to_string()))?;
+                    .map_err(|e: reqwest::Error| e.to_string())?;
 
                 Self::check_api_response(json)
             }
@@ -187,15 +187,15 @@ impl NapCatAdapter {
                 }
 
                 tx.send(frame.to_string())
-                    .map_err(|_| AyjxError::Adapter("WebSocket channel closed".into()))?;
+                    .map_err(|_| "WebSocket channel closed".to_string())?;
 
                 match tokio::time::timeout(Duration::from_secs(60), resp_rx).await {
                     Ok(Ok(json)) => Self::check_api_response(json),
-                    Ok(Err(_)) => Err(AyjxError::Adapter("Response channel closed".into())),
+                    Ok(Err(_)) => Err("Response channel closed".into()),
                     Err(_) => {
                         let mut pending = self.inner.pending_responses.write().await;
                         pending.remove(&echo);
-                        Err(AyjxError::Adapter("API request timeout".into()))
+                        Err("API request timeout".into())
                     }
                 }
             }
@@ -206,11 +206,12 @@ impl NapCatAdapter {
         match json["status"].as_str() {
             Some("ok") => Ok(json["data"].clone()),
             Some("async") => Ok(json["data"].clone()),
-            Some("failed") => Err(AyjxError::Adapter(format!(
+            Some("failed") => Err(format!(
                 "API failed: {} (retcode: {})",
                 json["msg"].as_str().unwrap_or("unknown"),
                 json["retcode"]
-            ))),
+            )
+            .into()),
             _ => Ok(json),
         }
     }
@@ -261,18 +262,39 @@ impl Adapter for NapCatAdapter {
         vec!["qq", "onebot", "napcat"]
     }
 
+    // 注册默认配置
+    fn default_config(&self) -> Option<toml::Value> {
+        let config = NapCatConfig {
+            bots: vec![BotConfig::WsReverse {
+                host: "0.0.0.0".to_string(),
+                port: 3001,
+                access_token: Some("napcat".to_string()),
+            }],
+        };
+
+        match toml::Value::try_from(config) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("[NapCat] 默认配置生成失败: {}", e);
+                None
+            }
+        }
+    }
+
     async fn start(&self, ctx: AdapterContext) -> AyjxResult<()> {
         let app_cfg = ctx.config.get().await;
-        let config: NapCatConfig = app_cfg
-            .plugins
-            .get("napcat")
-            .map(|v| v.clone().try_into())
-            .transpose()?
-            .unwrap_or_default();
+
+        let config: NapCatConfig = if let Some(val) = app_cfg.plugins.get("napcat") {
+            val.clone()
+                .try_into()
+                .map_err(|e| format!("[NapCat] 配置解析失败，请检查 config.toml 格式: {}", e))?
+        } else {
+            NapCatConfig::default()
+        };
 
         if config.bots.is_empty() {
-            ayjx_warn!(
-                "[NapCat] 未配置任何 Bot，请在 config.toml 的 [napcat] 下添加 [[napcat.bots]]"
+            println!(
+                "[NapCat] ⚠️ 警告: 未配置任何 Bot 连接。请检查 config.toml 中的 [[plugins.napcat.bots]]"
             );
             return Ok(());
         }
@@ -327,13 +349,10 @@ impl Adapter for NapCatAdapter {
 
     // ----- 消息 API -----
 
-    // ----- 消息 API (修改后) -----
-
     async fn send_message(&self, channel_id: &str, content: &str) -> AyjxResult<Vec<Message>> {
         let (msg_type, target_id) = parse_channel_id(channel_id);
 
         // 统一逻辑：将 Satori XML 转换为 OneBot 消息数组
-        // 无论是普通消息、合并转发(node)还是引用转发(forward id)，都由转换函数处理
         let ob_message_val = satori_to_onebot(content);
         let ob_message_vec = ob_message_val
             .as_array()
@@ -341,7 +360,6 @@ impl Adapter for NapCatAdapter {
             .unwrap_or_else(|| vec![ob_message_val]);
 
         // 直接调用发送接口
-        // NapCat/OneBot 接收到包含 "type": "node" 的数组时，会自动处理为合并转发消息
         let resp = if msg_type == "private" {
             self.send_private_msg(target_id, ob_message_vec, None)
                 .await?
@@ -488,9 +506,6 @@ impl Adapter for NapCatAdapter {
         guild_id: &str,
         _next: Option<&str>,
     ) -> AyjxResult<PagedList<Channel>> {
-        // 在 OneBot 模型中，Guild ID (Group ID) 本身就是一个 Channel
-        // 如果这里的 guild_id 是指平台层面的集合（比如频道所在的服务器），OneBot 没有这个概念
-        // 但如果这里的 context 是获取某群的信息作为 channel：
         let channel = self.get_channel(&format!("group:{}", guild_id)).await?;
         Ok(PagedList::new(vec![channel]))
     }
@@ -510,7 +525,6 @@ impl Adapter for NapCatAdapter {
 
     async fn mute_channel(&self, channel_id: &str, duration_ms: u64) -> AyjxResult<()> {
         let (_, target_id) = parse_channel_id(channel_id);
-        // duration_ms > 0 开启全体禁言，否则关闭
         self.set_group_whole_ban(target_id, duration_ms > 0, None)
             .await
     }
@@ -641,7 +655,7 @@ impl Adapter for NapCatAdapter {
         if role_id == "admin" {
             self.set_group_admin(guild_id, user_id, true, None).await
         } else {
-            Err(AyjxError::PermissionDenied("Unsupported role".into()))
+            Err("Unsupported role".into())
         }
     }
 
@@ -678,14 +692,14 @@ impl NapCatAdapter {
             loop {
                 match Self::ws_forward_connect(&url, &access_token, &inner, &ctx).await {
                     Ok(self_id) => {
-                        ayjx_warn!("[NapCat] WS 连接断开 (bot: {})", self_id);
+                        println!("[NapCat] WS 连接断开 (bot: {})", self_id);
                         inner.remove_connection(&self_id).await;
                     }
                     Err(e) => {
-                        ayjx_error!("[NapCat] WS 连接失败: {}", e);
+                        eprintln!("[NapCat] WS 连接失败: {}", e);
                     }
                 }
-                ayjx_info!("[NapCat] {}ms 后重连...", reconnect_interval_ms);
+                println!("[NapCat] {}ms 后重连...", reconnect_interval_ms);
                 tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)).await;
             }
         });
@@ -699,9 +713,9 @@ impl NapCatAdapter {
     ) -> AyjxResult<String> {
         let mut request = url
             .parse::<http::Uri>()
-            .map_err(|e| AyjxError::Config(format!("Invalid URL: {}", e)))?
+            .map_err(|e| format!("Invalid URL: {}", e))?
             .into_client_request()
-            .map_err(|e| AyjxError::Config(format!("Failed to create request: {}", e)))?;
+            .map_err(|e| format!("Failed to create request: {}", e))?;
 
         if let Some(token) = access_token {
             request.headers_mut().insert(
@@ -712,9 +726,9 @@ impl NapCatAdapter {
 
         let (ws_stream, _) = connect_async(request)
             .await
-            .map_err(|e| AyjxError::Adapter(format!("WebSocket connect failed: {}", e)))?;
+            .map_err(|e| format!("WebSocket connect failed: {}", e))?;
 
-        ayjx_info!("[NapCat] 正向 WS 连接成功: {}", url);
+        println!("[NapCat] 正向 WS 连接成功: {}", url);
 
         let (mut write, mut read) = ws_stream.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -788,12 +802,12 @@ impl NapCatAdapter {
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    ayjx_error!("[NapCat] 反向 WS 监听失败: {}", e);
+                    eprintln!("[NapCat] 反向 WS 监听失败: {}", e);
                     return;
                 }
             };
 
-            ayjx_info!("[NapCat] 反向 WS 服务器监听于 {}", addr);
+            println!("[NapCat] 反向 WS 服务器监听于 {}", addr);
 
             while let Ok((stream, peer_addr)) = listener.accept().await {
                 let inner = inner.clone();
@@ -833,12 +847,12 @@ impl NapCatAdapter {
                     let ws_stream = match accept_hdr_async(stream, callback).await {
                         Ok(ws) => ws,
                         Err(e) => {
-                            ayjx_warn!("[NapCat] WS 握手失败 {}: {}", peer_addr, e);
+                            println!("[NapCat] WS 握手失败 {}: {}", peer_addr, e);
                             return;
                         }
                     };
 
-                    ayjx_info!("[NapCat] 反向 WS 客户端连接: {}", peer_addr);
+                    println!("[NapCat] 反向 WS 客户端连接: {}", peer_addr);
 
                     let (mut write, mut read) = ws_stream.split();
                     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -894,7 +908,7 @@ impl NapCatAdapter {
                     if !self_id.is_empty() {
                         inner.remove_connection(&self_id).await;
                     }
-                    ayjx_info!("[NapCat] 反向 WS 客户端断开: {}", peer_addr);
+                    println!("[NapCat] 反向 WS 客户端断开: {}", peer_addr);
                 });
             }
         });
@@ -973,7 +987,7 @@ impl NapCatAdapter {
                         let expected_sig = hex::encode(result);
 
                         if provided_sig != expected_sig {
-                            ayjx_warn!("[NapCat] HTTP 事件签名验证失败");
+                            println!("[NapCat] HTTP 事件签名验证失败");
                             return Err(StatusCode::FORBIDDEN);
                         }
                     }
@@ -1005,16 +1019,16 @@ impl NapCatAdapter {
                     .with_state(state);
 
                 let addr = format!("0.0.0.0:{}", port);
-                ayjx_info!("[NapCat] HTTP 事件服务器监听于 {}", addr);
+                println!("[NapCat] HTTP 事件服务器监听于 {}", addr);
 
                 match tokio::net::TcpListener::bind(&addr).await {
                     Ok(listener) => {
                         if let Err(e) = axum::serve(listener, app).await {
-                            ayjx_error!("[NapCat] HTTP 事件服务器运行错误: {}", e);
+                            eprintln!("[NapCat] HTTP 事件服务器运行错误: {}", e);
                         }
                     }
                     Err(e) => {
-                        ayjx_error!("[NapCat] HTTP 事件服务器启动失败: {}", e);
+                        eprintln!("[NapCat] HTTP 事件服务器启动失败: {}", e);
                     }
                 }
             });
@@ -1027,11 +1041,6 @@ impl NapCatAdapter {
 // ============================================================================
 
 /// 将 OneBot 事件转换为 Satori 事件
-///
-/// 策略：
-/// 1. 尽可能映射到 Satori 标准事件类型 (`type`) 以保证通用性。
-/// 2. 将 OneBot 原始事件名保留在 `_type` (`platform_type`) 中，解决"语义模糊"问题。
-/// 3. 将完整原始 JSON 保留在 `platform_data` 中，解决"字段缺失"问题。
 pub fn onebot_event_to_satori(json: Value, self_id: Option<String>) -> Option<Event> {
     let post_type = json["post_type"].as_str()?;
     let time = json["time"].as_i64().unwrap_or(0) * 1000;
@@ -1062,8 +1071,6 @@ pub fn onebot_event_to_satori(json: Value, self_id: Option<String>) -> Option<Ev
 
     // 统一善后处理
     event.login = Some(login);
-    // 将原始 JSON 注入 platform_data，解决字段缺失问题 (如 duration, file 详情等)
-    // 开发者可在业务层通过 downcast 获取原始数据
     event.platform_data = Some(Arc::new(json.clone()));
 
     Some(event)
@@ -1169,15 +1176,12 @@ fn convert_message_event(json: &Value, time: i64) -> Option<Event> {
     }
 
     let mut event = Event::message_created(msg);
-    // 消息事件的 platform_type 也是 message
     event.platform_type = Some(msg_type.to_string());
     event.timestamp = time;
     Some(event)
 }
 
 /// 处理通知事件 (Notice Event)
-///
-/// 这里的关键改动是设置 `platform_type`，使上层能识别出具体的 OneBot 事件类型。
 fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
     let notice_type = json["notice_type"].as_str()?;
     let sub_type = json["sub_type"].as_str();
@@ -1599,7 +1603,7 @@ fn satori_to_onebot(content: &str) -> Value {
         && text_val.len() < content.len() * 7 / 10
         && !content.is_empty()
     {
-        ayjx_debug!("[NapCat] 检测到潜在的 XML 解析文本丢失，回退为纯文本模式");
+        println!("[NapCat] 检测到潜在的 XML 解析文本丢失，回退为纯文本模式");
         return json!([
             {
                 "type": "text",
@@ -1622,7 +1626,6 @@ fn satori_to_onebot(content: &str) -> Value {
         ]);
     }
 
-    // ayjx_debug!("[NapCat] 转换后的 OneBot 消息数组: {:?}", arr);
     json!(arr)
 }
 
