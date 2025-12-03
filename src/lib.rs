@@ -1742,6 +1742,11 @@ pub mod message_elements {
             xml.push_str("</message>");
             xml
         }
+
+        /// 从 MessageBuilder 创建节点，提升流畅度
+        pub fn from_builder(builder: MessageBuilder) -> Self {
+            Self::new(builder.build())
+        }
     }
 
     /// 构建消息元素（用于发送）
@@ -1755,6 +1760,13 @@ pub mod message_elements {
             Self {
                 content: String::new(),
             }
+        }
+
+        /// 将另一个构建器的内容追加到当前构建器
+        /// 方便模块化构建消息
+        pub fn append(mut self, other: MessageBuilder) -> Self {
+            self.content.push_str(&other.content);
+            self
         }
 
         /// 添加纯文本
@@ -1918,6 +1930,13 @@ pub mod message_elements {
 
         pub fn build(self) -> String {
             self.content
+        }
+    }
+
+    // 允许 MessageBuilder 直接转为 String，方便 Into<String> 参数的使用
+    impl From<MessageBuilder> for String {
+        fn from(builder: MessageBuilder) -> Self {
+            builder.build()
         }
     }
 
@@ -2751,6 +2770,25 @@ impl PluginContext {
         self.send_message(adapter_id, channel_id, content).await
     }
 
+    /// 上下文智能发送
+    /// 自动从 event 中提取适配器和频道信息，发送消息到当前场景
+    /// 支持 String, &str, MessageBuilder 等实现了 Into<String> 的类型
+    pub async fn send_current(
+        &self,
+        event: &Event,
+        content: impl Into<String>,
+    ) -> AyjxResult<Vec<Message>> {
+        let adapter_id = event
+            .adapter()
+            .ok_or_else(|| "Event has no adapter info".to_string())?;
+        let channel_id = event
+            .channel_id()
+            .ok_or_else(|| "Event has no channel info".to_string())?;
+
+        self.send_message(adapter_id, channel_id, &content.into())
+            .await
+    }
+
     /// 等待下一条符合条件的消息
     pub async fn wait_for<F>(&self, matcher: F) -> AyjxResult<Event>
     where
@@ -3027,13 +3065,6 @@ impl AyjxBuilder {
         self
     }
 
-    /// 添加默认中间件
-    pub fn with_default_middlewares(self) -> Self {
-        // 现在黑名单是一个插件，不再作为内置中间件处理
-        // 如果有其他内置中间件可保留，否则此方法可废弃或留空
-        self
-    }
-
     /// 构建并返回框架实例
     pub fn build(self) -> Ayjx {
         Ayjx::from_builder(self)
@@ -3130,7 +3161,7 @@ impl Ayjx {
         let mut initial_config = self.inner.config.load().await?;
         let mut config_modified = false;
 
-        // [新增] 1.5 配置自动注册与合并
+        // 1.5 配置自动注册与合并
         // 检查所有插件，如果配置中不存在该插件的块，则写入默认配置
         println!("[Ayjx] 正在检查配置完整性...");
 
@@ -3141,27 +3172,25 @@ impl Ayjx {
                 let pid = slot.plugin.id();
                 // 如果配置中没有这个插件的 key，且插件提供了默认配置
                 if !initial_config.plugins.contains_key(pid)
-                    && let Some(def_cfg) = slot.plugin.default_config() {
-                        println!("[Ayjx]   + 初始化插件配置: {}", slot.plugin.name());
-                        initial_config.plugins.insert(pid.to_string(), def_cfg);
-                        config_modified = true;
-                    }
+                    && let Some(def_cfg) = slot.plugin.default_config()
+                {
+                    println!("[Ayjx]   + 初始化插件配置: {}", slot.plugin.name());
+                    initial_config.plugins.insert(pid.to_string(), def_cfg);
+                    config_modified = true;
+                }
             }
         }
 
-        // 检查适配器配置 (逻辑同上，适配器通常也存放在 plugins 字典或单独字段，这里为了统一暂存入 plugins)
-        // 注意：如果你希望适配器配置单独存放（如 [adapters.qq]），需修改 AppConfig 结构。
-        // 这里假设适配器配置也混入 plugins 结构或你需要扩展 AppConfig。
-        // 为了演示，我们暂时将其视为一种"组件配置"，同样存入 config.plugins (因为 AppConfig 只有 plugins 字段支持动态 Map)
         {
             let adapters = self.inner.adapters.read().await;
             for (id, adapter) in adapters.iter() {
                 if !initial_config.plugins.contains_key(id)
-                    && let Some(def_cfg) = adapter.default_config() {
-                        println!("[Ayjx]   + 初始化适配器配置: {}", adapter.name());
-                        initial_config.plugins.insert(id.to_string(), def_cfg);
-                        config_modified = true;
-                    }
+                    && let Some(def_cfg) = adapter.default_config()
+                {
+                    println!("[Ayjx]   + 初始化适配器配置: {}", adapter.name());
+                    initial_config.plugins.insert(id.to_string(), def_cfg);
+                    config_modified = true;
+                }
             }
         }
 
@@ -3317,7 +3346,6 @@ impl Ayjx {
                 continue;
             }
             // 无论是否启用，或者异步卸载是否成功，都调用 cleanup 进行最终清理
-            // 修复：使用 cleanup 代替 drop 以避免 E0040 错误
             slot.plugin.cleanup();
         }
 
@@ -3362,10 +3390,10 @@ impl AyjxInner {
         }
 
         // 3. 分发给插件
-        // 关键优化：获取快照，避免在执行插件逻辑时持有锁
+        // 获取快照，避免在执行插件逻辑时持有锁
         let slots: Vec<PluginSlot> = {
             let guard = self.plugins.read().await;
-            guard.clone() // <--- 现在 PluginSlot 实现了 Clone，这里可以工作了
+            guard.clone()
         }; // 读锁在这里释放，防止死锁
 
         for slot in slots {
