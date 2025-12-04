@@ -120,7 +120,6 @@ impl Plugin for ConsoleLoggerPlugin {
         // 1. 消息事件处理 (包含发送前预处理)
         // ----------------------------------------------------------------
         if event.is_message_event() {
-            // 尝试获取群组名称：优先查 event.guild，其次查 event.message.guild
             let guild_name = event
                 .guild
                 .as_ref()
@@ -132,7 +131,6 @@ impl Plugin for ConsoleLoggerPlugin {
             } else if event.message.as_ref().is_some_and(|m| m.is_direct()) {
                 self.green("[私聊]")
             } else {
-                // Before Send 或未完全填充的情况
                 let target = event
                     .channel_id()
                     .or(event.message.as_ref().and_then(|m| m.channel_id()))
@@ -140,7 +138,6 @@ impl Plugin for ConsoleLoggerPlugin {
                 self.blue(&format!("[To:{}]", target))
             };
 
-            // 尝试获取发送者名称：优先查 event.member/user，其次查 event.message.member/user
             let member_ref = event
                 .member
                 .as_ref()
@@ -151,8 +148,6 @@ impl Plugin for ConsoleLoggerPlugin {
                 .or(event.message.as_ref().and_then(|m| m.user.as_ref()));
 
             let sender_name = if let Some(member) = member_ref {
-                // 优先使用 member 的 display_name (nick > user.name)
-                // 如果 member 中没有 user 信息且 nick 为空，尝试回退到 user_ref
                 member
                     .display_name()
                     .map(|s| s.to_string())
@@ -164,7 +159,6 @@ impl Plugin for ConsoleLoggerPlugin {
                 "System".to_string()
             };
 
-            // 区分发送方向
             let (direction_tag, sender_tag) = if event.event_type == event_types::BEFORE_SEND {
                 (self.green("<< SEND"), self.cyan("Bot"))
             } else {
@@ -226,8 +220,6 @@ impl Plugin for ConsoleLoggerPlugin {
                 self.green(btn_id)
             );
         } else if event.event_type == "interaction/poke" {
-            // 解析戳一戳事件
-            // operator: 发起者, user: 目标
             let operator_name = event
                 .operator
                 .as_ref()
@@ -376,8 +368,6 @@ impl Plugin for ConsoleLoggerPlugin {
         // 7. 其他未知事件
         // ----------------------------------------------------------------
         else {
-            // 可选：如果不希望打印 Login Added/Removed 事件的 "Unhandled Event"，
-            // 可以在此处添加过滤，或者上面 Login 处理逻辑显式包含但不打印
             if event.event_type != event_types::LOGIN_ADDED
                 && event.event_type != event_types::LOGIN_REMOVED
             {

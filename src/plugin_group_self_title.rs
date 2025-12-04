@@ -10,13 +10,14 @@ impl Plugin for SelfTitlePlugin {
     fn id(&self) -> &str {
         "group_self_title"
     }
-
     fn name(&self) -> &str {
         "Group Self Title"
     }
-
     fn description(&self) -> &str {
         "自助头衔插件"
+    }
+    fn version(&self) -> &str {
+        "0.1.0"
     }
 
     async fn on_event(&self, ctx: &PluginContext, event: &Event) -> AyjxResult<EventResult> {

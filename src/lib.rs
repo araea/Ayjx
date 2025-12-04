@@ -2118,18 +2118,26 @@ pub mod command {
         pub args_text: String,
         /// 参数部分的元素列表 (包含文本、图片等)
         pub args_elements: Vec<Element>,
+        /// 引用回复的消息 ID (来源于指令前文被忽略的 quote 元素)
+        pub quote_id: Option<String>,
+        /// 提及的用户 ID 列表 (来源于指令前文被忽略的 at 元素，按出现顺序排列)
+        pub at_user_ids: Vec<Option<String>>,
     }
 
     /// 智能解析指令
     ///
     /// # 逻辑步骤
     /// 1. 解析 XML 消息内容。
-    /// 2. 跳过消息头部的干扰项（引用回复、@别人、@机器人、空白字符）。
-    /// 3. 寻找第一个文本节点。
+    /// 2. 遍历消息头部，收集引用(Quote)和提及(At)信息，同时跳过这些干扰项和空白字符。
+    /// 3. 寻找第一个有效文本节点。
     /// 4. 尝试匹配 `prefixes` + `command_name`。
-    /// 5. 如果匹配，提取剩余部分作为参数。
+    /// 5. 如果匹配，提取剩余部分作为参数，并返回包含前文上下文的解析结果。
     pub fn parse(content: &str, prefixes: &[String], command_name: &str) -> Option<ParsedCommand> {
         let elements = message_elements::parse(content);
+
+        // 上下文收集容器
+        let mut quote_id = None;
+        let mut at_user_ids = Vec::new();
 
         // 智能定位指令起始位置
         let mut start_index = 0;
@@ -2137,13 +2145,26 @@ pub mod command {
 
         for (i, elem) in elements.iter().enumerate() {
             match elem {
-                // 1. 忽略 引用回复 和 艾特
-                Element::Quote { .. } | Element::At { .. } => continue,
+                // 1. 收集并忽略 引用回复
+                // 遇到引用时，提取其 ID。如果有多层引用，这里的逻辑会保留最后一个遇到的 ID。
+                Element::Quote { id, .. } => {
+                    if let Some(qid) = id {
+                        quote_id = Some(qid.clone());
+                    }
+                }
 
-                // 2. 忽略 At 之间的纯空白文本节点
+                // 2. 收集并忽略 艾特
+                // 遇到 At 时，将其 ID 加入列表，保留顺序。
+                Element::At { id, .. } => {
+                    at_user_ids.push(id.clone());
+                    // 继续循环，不将 At 视为指令起始
+                }
+
+                // 3. 忽略 At/Quote 之间的纯空白文本节点
                 Element::Text(t) if t.trim().is_empty() => continue,
 
-                // 3. 找到第一个既不是At/Quote，也不是纯空格的节点
+                // 4. 找到第一个既不是At/Quote，也不是纯空格的节点
+                // 这通常是指令文本的开始，或者是图片等非指令元素
                 _ => {
                     start_index = i;
                     found_valid_node = true;
@@ -2194,6 +2215,8 @@ pub mod command {
                         args_raw,
                         args_text,
                         args_elements: final_elements,
+                        quote_id,
+                        at_user_ids,
                     });
                 }
             }

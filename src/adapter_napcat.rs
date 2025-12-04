@@ -310,7 +310,6 @@ impl Adapter for NapCatAdapter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
     fn id(&self) -> &str {
         "napcat"
     }
@@ -318,7 +317,7 @@ impl Adapter for NapCatAdapter {
         "NapCat (OneBot V11)"
     }
     fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
+        "0.1.0"
     }
     fn platforms(&self) -> Vec<&str> {
         vec!["qq", "onebot", "napcat"]

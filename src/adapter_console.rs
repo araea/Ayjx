@@ -24,17 +24,17 @@ impl Adapter for ConsoleAdapter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
     fn id(&self) -> &str {
         &self.id
     }
-
     fn name(&self) -> &str {
         "Console Adapter"
     }
-
     fn platforms(&self) -> Vec<&str> {
         vec!["console"]
+    }
+    fn version(&self) -> &str {
+        "0.1.0"
     }
 
     async fn start(&self, ctx: AdapterContext) -> AyjxResult<()> {
