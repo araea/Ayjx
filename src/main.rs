@@ -3,16 +3,18 @@ mod adapter_napcat;
 
 mod plugin_blacklist;
 mod plugin_echo;
+mod plugin_group_self_title;
 mod plugin_logger;
-
-use ayjx::Ayjx;
+mod plugin_repeater;
 
 use adapter_console::ConsoleAdapter;
 use adapter_napcat::NapCatAdapter;
 
 use plugin_blacklist::BlacklistPlugin;
 use plugin_echo::EchoPlugin;
+use plugin_group_self_title::SelfTitlePlugin;
 use plugin_logger::ConsoleLoggerPlugin;
+use plugin_repeater::RepeaterPlugin;
 
 use ayjx::prelude::*;
 
@@ -24,6 +26,8 @@ async fn main() -> AyjxResult<()> {
         .plugin(BlacklistPlugin)
         .plugin(ConsoleLoggerPlugin::new())
         .plugin(EchoPlugin)
+        .plugin(RepeaterPlugin::new())
+        .plugin(SelfTitlePlugin)
         .build();
 
     ayjx.run().await?;

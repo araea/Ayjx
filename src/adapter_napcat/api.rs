@@ -2438,8 +2438,8 @@ pub trait NapCatApi: Sync + Send {
         self.call_api(
             "set_group_special_title",
             json!({
-                "group_id": group_id.parse::<i64>().unwrap_or(0),
-                "user_id": user_id.parse::<i64>().unwrap_or(0),
+                "group_id": group_id,
+                "user_id": user_id,
                 "special_title": special_title
             }),
             self_id,

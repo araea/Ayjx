@@ -1,12 +1,12 @@
 use ayjx::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{RwLock, mpsc};
 
-/// 控制台适配器
 pub struct ConsoleAdapter {
     id: String,
-    // 用于生成简单的消息 ID
     msg_seq: AtomicU64,
+    event_tx: RwLock<Option<mpsc::Sender<Event>>>,
 }
 
 impl Default for ConsoleAdapter {
@@ -14,6 +14,7 @@ impl Default for ConsoleAdapter {
         Self {
             id: "console-01".to_string(),
             msg_seq: AtomicU64::new(0),
+            event_tx: RwLock::new(None),
         }
     }
 }
@@ -37,11 +38,10 @@ impl Adapter for ConsoleAdapter {
     }
 
     async fn start(&self, ctx: AdapterContext) -> AyjxResult<()> {
-        println!("--------------------------------------------------");
-        println!("[Console] 控制台适配器已启动。");
-        println!("[Console] 输入 /exit 退出程序");
-        println!("[Console] 尝试输入 /echo hello 或 /survey 开始体验");
-        println!("--------------------------------------------------");
+        {
+            let mut tx = self.event_tx.write().await;
+            *tx = Some(ctx.event_tx.clone());
+        }
 
         let mock_user = User {
             id: "console_user".to_string(),
@@ -61,7 +61,6 @@ impl Adapter for ConsoleAdapter {
         let event_tx = ctx.event_tx.clone();
         let adapter_id = self.id.to_string();
         let mut sys_rx = ctx.system_rx.resubscribe();
-        // 简单的序列号生成
         let _seq = 0;
 
         tokio::spawn(async move {
@@ -69,10 +68,23 @@ impl Adapter for ConsoleAdapter {
             let mut reader = BufReader::new(stdin).lines();
             let mut counter = 0u64;
 
+            // --- 生命周期：创建登录信息 ---
+            let mut login_info = Login::new("console", &adapter_id);
+            login_info.user = Some(mock_user.clone());
+            login_info.status = LoginStatus::Online;
+
+            if let Err(e) = event_tx.send(Event::login_added(login_info.clone())).await {
+                eprintln!("ConsoleAdapter 发送 login-added 失败: {}", e);
+                return;
+            }
+
+            let _ = event_tx
+                .send(Event::login_updated(login_info.clone()))
+                .await;
+
             loop {
                 tokio::select! {
                     Ok(SystemSignal::Shutdown) = sys_rx.recv() => {
-                        println!("ConsoleAdapter 停止输入监听");
                         break;
                     }
                     line_result = reader.next_line() => {
@@ -82,8 +94,7 @@ impl Adapter for ConsoleAdapter {
                                 if content.is_empty() { continue; }
 
                                 if content == "/exit" {
-                                    println!("正在退出...");
-                                    std::process::exit(0);
+                                    break;
                                 }
 
                                 counter += 1;
@@ -93,9 +104,7 @@ impl Adapter for ConsoleAdapter {
                                 msg.channel = Some(mock_channel.clone());
 
                                 let mut event = Event::message_created(msg);
-                                let mut login = Login::new("console", &adapter_id);
-                                login.status = LoginStatus::Online;
-                                event.login = Some(login);
+                                event.login = Some(login_info.clone());
 
                                 if let Err(e) = event_tx.send(event).await {
                                     eprintln!("发送事件失败: {}", e);
@@ -111,13 +120,21 @@ impl Adapter for ConsoleAdapter {
                     }
                 }
             }
+
+            // --- 生命周期：清理登录信息 ---
+            login_info.status = LoginStatus::Offline;
+
+            let _ = event_tx
+                .send(Event::login_updated(login_info.clone()))
+                .await;
+
+            let _ = event_tx.send(Event::login_removed(login_info)).await;
         });
 
         Ok(())
     }
 
     async fn stop(&self) -> AyjxResult<()> {
-        println!("控制台适配器已关闭");
         Ok(())
     }
 
@@ -125,14 +142,41 @@ impl Adapter for ConsoleAdapter {
         Ok(Login::new("console", &self.id))
     }
 
-    async fn send_message(&self, _channel_id: &str, content: &str) -> AyjxResult<Vec<Message>> {
-        let elements = message_elements::parse(content);
-        let plain_text = message_elements::to_plain_text(&elements);
-
-        // 使用终端颜色代码美化输出
-        println!("\x1b[36m[Ayjx Bot] > {}\x1b[0m", plain_text);
-
+    async fn send_message(&self, channel_id: &str, content: &str) -> AyjxResult<Vec<Message>> {
         let seq = self.msg_seq.fetch_add(1, Ordering::Relaxed);
-        Ok(vec![Message::new(format!("reply_{}", seq), content)])
+        let msg_id = format!("reply_{}", seq);
+
+        let bot_user = User {
+            id: self.id.clone(),
+            name: Some("Ayjx Bot".to_string()),
+            nick: Some("Bot".to_string()),
+            is_bot: Some(true),
+            avatar: None,
+        };
+
+        let channel = Channel {
+            id: channel_id.to_string(),
+            channel_type: ChannelType::Text,
+            name: Some("Terminal".to_string()),
+            parent_id: None,
+        };
+
+        let mut message = Message::new(msg_id, content);
+        message.user = Some(bot_user);
+        message.channel = Some(channel);
+
+        let mut event = Event::message_created(message.clone());
+        event.login = Some(Login::new("console", &self.id));
+
+        let tx_guard = self.event_tx.read().await;
+        if let Some(tx) = &*tx_guard {
+            if let Err(e) = tx.send(event).await {
+                eprintln!("ConsoleAdapter 发送回复事件失败: {}", e);
+            }
+        } else {
+            eprintln!("ConsoleAdapter 未初始化 Event Sender");
+        }
+
+        Ok(vec![message])
     }
 }

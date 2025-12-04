@@ -48,16 +48,6 @@ pub enum BotConfig {
         #[serde(default)]
         access_token: Option<String>,
     },
-    /// HTTP 模式
-    Http {
-        api_url: String,
-        #[serde(default)]
-        event_port: Option<u16>,
-        #[serde(default)]
-        access_token: Option<String>,
-        #[serde(default)]
-        secret: Option<String>,
-    },
 }
 
 fn default_reconnect_interval() -> u64 {
@@ -72,32 +62,31 @@ fn default_reconnect_interval() -> u64 {
 #[derive(Clone)]
 enum BotSender {
     Ws(mpsc::UnboundedSender<String>),
-    Http {
-        client: reqwest::Client,
-        api_url: String,
-        access_token: Option<String>,
-    },
 }
 
 /// 适配器内部状态
 struct AdapterInner {
     connections: RwLock<HashMap<String, BotSender>>,
     pending_responses: RwLock<HashMap<String, oneshot::Sender<Value>>>,
+    logins: RwLock<HashMap<String, Login>>,
+    // 新增：保存上下文以支持在 send_message 中推送事件
+    context: RwLock<Option<AdapterContext>>,
 }
 
 impl AdapterInner {
     async fn register_connection(&self, self_id: String, sender: BotSender) {
         let mut map = self.connections.write().await;
         map.insert(self_id.clone(), sender);
-        println!("[NapCat] Bot {} 已连接", self_id);
-        println!("--------------------------------------------------");
     }
 
     async fn remove_connection(&self, self_id: &str) {
-        let mut map = self.connections.write().await;
-        if map.remove(self_id).is_some() {
-            println!("[NapCat] Bot {} 已断开", self_id);
+        {
+            let mut map = self.connections.write().await;
+            if map.remove(self_id).is_some() {}
         }
+        // 连接断开时清理缓存
+        let mut logins = self.logins.write().await;
+        logins.remove(self_id);
     }
 }
 
@@ -112,19 +101,19 @@ impl NapCatAdapter {
             inner: Arc::new(AdapterInner {
                 connections: RwLock::new(HashMap::new()),
                 pending_responses: RwLock::new(HashMap::new()),
+                logins: RwLock::new(HashMap::new()),
+                context: RwLock::new(None), // 初始化为空
             }),
         }
     }
 
     /// 获取当前所有已连接 Bot 的 ID 和连接类型
-    /// 用于测试和监控
     pub async fn get_connected_bots(&self) -> Vec<(String, String)> {
         let map = self.inner.connections.read().await;
         map.iter()
             .map(|(id, sender)| {
                 let type_name = match sender {
                     BotSender::Ws(_) => "WebSocket",
-                    BotSender::Http { .. } => "HTTP",
                 };
                 (id.clone(), type_name.to_string())
             })
@@ -149,29 +138,6 @@ impl NapCatAdapter {
         .ok_or_else(|| "No active bot connection".to_string())?;
 
         match sender {
-            BotSender::Http {
-                client,
-                api_url,
-                access_token,
-            } => {
-                let url = format!("{}/{}", api_url.trim_end_matches('/'), action);
-                let mut req = client.post(&url).json(&params);
-                if let Some(token) = &access_token {
-                    req = req.header("Authorization", format!("Bearer {}", token));
-                }
-
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e: reqwest::Error| e.to_string())?;
-
-                let json: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e: reqwest::Error| e.to_string())?;
-
-                Self::check_api_response(json)
-            }
             BotSender::Ws(tx) => {
                 let echo = uuid::Uuid::new_v4().to_string();
                 let frame = json!({
@@ -200,6 +166,102 @@ impl NapCatAdapter {
                 }
             }
         }
+    }
+
+    /// 尝试更新登录信息的缓存
+    async fn update_login_info(&self, self_id: String) {
+        if self.inner.logins.read().await.contains_key(&self_id) {
+            return;
+        }
+
+        // 构造基础 Login
+        let mut login = Login::new("qq", "napcat");
+        let mut user = User::new(self_id.clone());
+        user.avatar = Some(format!("https://q1.qlogo.cn/g?b=qq&nk={}&s=640", self_id));
+        user.is_bot = Some(true);
+        login.user = Some(user);
+        login.status = LoginStatus::Online;
+
+        // 尝试调用 API 获取详细信息
+        match self.get_login_info(Some(&self_id)).await {
+            Ok(info) => {
+                if let Some(user) = login.user.as_mut()
+                    && let Some(nick) = info["nickname"].as_str()
+                {
+                    user.name = Some(nick.to_string());
+                    user.nick = Some(nick.to_string());
+                }
+            }
+            Err(e) => {
+                eprintln!("[NapCat] 获取 Bot {} 登录详情失败: {}", self_id, e);
+            }
+        }
+
+        self.inner.logins.write().await.insert(self_id, login);
+    }
+
+    /// 获取缓存的 Login 信息，如果不存在则返回默认构造
+    async fn get_cached_login(&self, self_id: &str) -> Login {
+        if let Some(login) = self.inner.logins.read().await.get(self_id) {
+            return login.clone();
+        }
+
+        let mut login = Login::new("qq", "napcat");
+        login.user = Some(User::new(self_id.to_string()));
+        login.status = LoginStatus::Online;
+        login
+    }
+
+    /// 处理消息片段发送
+    async fn send_element_slice(
+        &self,
+        msg_type: &str,
+        target_id: &str,
+        batch: &[Element],
+    ) -> AyjxResult<Option<Message>> {
+        let ob_message_val = elements_to_onebot(batch);
+
+        if let Some(arr) = ob_message_val.as_array()
+            && arr.is_empty()
+        {
+            return Ok::<Option<Message>, Box<dyn std::error::Error + Send + Sync>>(None);
+        }
+
+        let msg_id = self
+            .send_onebot_msg(msg_type, target_id, ob_message_val)
+            .await?;
+
+        Ok(Some(Message {
+            id: msg_id,
+            content: String::new(),
+            ..Default::default()
+        }))
+    }
+
+    /// 统一处理 OneBot 消息发送逻辑
+    async fn send_onebot_msg(
+        &self,
+        msg_type: &str,
+        target_id: &str,
+        message: Value,
+    ) -> AyjxResult<String> {
+        let ob_message_vec = message.as_array().cloned().unwrap_or_else(|| vec![message]);
+
+        let resp = if msg_type == "private" {
+            self.send_private_msg(target_id, ob_message_vec, None)
+                .await?
+        } else {
+            self.send_group_msg(target_id, ob_message_vec, None).await?
+        };
+
+        // 提取消息ID (兼容不同返回结构)
+        let msg_id = resp["message_id"]
+            .as_str()
+            .or_else(|| resp["data"]["message_id"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(msg_id)
     }
 
     fn check_api_response(json: Value) -> AyjxResult<Value> {
@@ -262,14 +324,22 @@ impl Adapter for NapCatAdapter {
         vec!["qq", "onebot", "napcat"]
     }
 
-    // 注册默认配置
     fn default_config(&self) -> Option<toml::Value> {
         let config = NapCatConfig {
-            bots: vec![BotConfig::WsReverse {
-                host: "0.0.0.0".to_string(),
-                port: 3001,
-                access_token: Some("napcat".to_string()),
-            }],
+            bots: vec![
+                // 默认 1: 正向 WebSocket (主动连接 NapCat)
+                BotConfig::WsForward {
+                    url: "ws://127.0.0.1:3001".to_string(),
+                    access_token: Some("".to_string()),
+                    reconnect_interval_ms: default_reconnect_interval(),
+                },
+                // 默认 2: 反向 WebSocket (监听来自 NapCat 的连接)
+                BotConfig::WsReverse {
+                    host: "0.0.0.0".to_string(),
+                    port: 8080,
+                    access_token: Some("".to_string()),
+                },
+            ],
         };
 
         match toml::Value::try_from(config) {
@@ -282,6 +352,9 @@ impl Adapter for NapCatAdapter {
     }
 
     async fn start(&self, ctx: AdapterContext) -> AyjxResult<()> {
+        // 保存 Context 以便在 send_message 中使用
+        *self.inner.context.write().await = Some(ctx.clone());
+
         let app_cfg = ctx.config.get().await;
 
         let config: NapCatConfig = if let Some(val) = app_cfg.plugins.get("napcat") {
@@ -306,7 +379,14 @@ impl Adapter for NapCatAdapter {
                     access_token,
                     reconnect_interval_ms,
                 } => {
-                    self.start_ws_forward(url, access_token, reconnect_interval_ms, ctx.clone());
+                    if !url.is_empty() {
+                        self.start_ws_forward(
+                            url,
+                            access_token,
+                            reconnect_interval_ms,
+                            ctx.clone(),
+                        );
+                    }
                 }
                 BotConfig::WsReverse {
                     host,
@@ -314,14 +394,6 @@ impl Adapter for NapCatAdapter {
                     access_token,
                 } => {
                     self.start_ws_reverse(host, port, access_token, ctx.clone());
-                }
-                BotConfig::Http {
-                    api_url,
-                    event_port,
-                    access_token,
-                    secret,
-                } => {
-                    self.start_http(api_url, event_port, access_token, secret, ctx.clone());
                 }
             }
         }
@@ -338,10 +410,7 @@ impl Adapter for NapCatAdapter {
     async fn get_login(&self) -> AyjxResult<Login> {
         let map = self.inner.connections.read().await;
         if let Some((id, _)) = map.iter().next() {
-            let mut login = Login::new("qq", "napcat");
-            login.user = Some(User::new(id.clone()));
-            login.status = LoginStatus::Online;
-            Ok(login)
+            Ok(self.get_cached_login(id).await)
         } else {
             Ok(Login::new("qq", "napcat"))
         }
@@ -351,34 +420,133 @@ impl Adapter for NapCatAdapter {
 
     async fn send_message(&self, channel_id: &str, content: &str) -> AyjxResult<Vec<Message>> {
         let (msg_type, target_id) = parse_channel_id(channel_id);
+        let mut sent_messages = Vec::new();
 
-        // 统一逻辑：将 Satori XML 转换为 OneBot 消息数组
-        let ob_message_val = satori_to_onebot(content);
-        let ob_message_vec = ob_message_val
-            .as_array()
-            .cloned()
-            .unwrap_or_else(|| vec![ob_message_val]);
-
-        // 直接调用发送接口
-        let resp = if msg_type == "private" {
-            self.send_private_msg(target_id, ob_message_vec, None)
-                .await?
+        // 1. 如果没有 XML 特征，直接作为纯文本发送
+        if !content.contains('<') && !content.contains('>') {
+            let ob_message = json!([{ "type": "text", "data": { "text": content } }]);
+            let msg_id = self
+                .send_onebot_msg(msg_type, target_id, ob_message)
+                .await?;
+            sent_messages.push(Message {
+                id: msg_id,
+                content: content.to_string(),
+                ..Default::default()
+            });
         } else {
-            self.send_group_msg(target_id, ob_message_vec, None).await?
-        };
+            // 2. 解析并遍历元素
+            let elements = message_elements::parse(content);
+            let mut buffer: Vec<Element> = Vec::new();
 
-        // 提取消息ID (兼容不同返回结构)
-        let msg_id = resp["message_id"]
-            .as_str()
-            .or_else(|| resp["data"]["message_id"].as_str())
-            .unwrap_or("")
-            .to_string();
+            for elem in elements {
+                if matches!(elem, Element::Message { .. }) {
+                    // 遇到 <message> 标签：
 
-        Ok(vec![Message {
-            id: msg_id,
-            content: content.to_string(),
-            ..Default::default()
-        }])
+                    // A. 立即发送之前缓冲区的内容（如果有）
+                    if !buffer.is_empty() {
+                        if let Some(msg) = self
+                            .send_element_slice(msg_type, target_id, &buffer)
+                            .await?
+                        {
+                            sent_messages.push(msg);
+                        }
+                        buffer.clear();
+                    }
+
+                    // B. 处理当前的 <message> 元素
+                    if let Some(msg) = self
+                        .send_element_slice(msg_type, target_id, &[elem])
+                        .await?
+                    {
+                        sent_messages.push(msg);
+                    }
+                } else {
+                    // 普通元素加入缓冲区
+                    buffer.push(elem);
+                }
+            }
+
+            // 3. 发送剩余的缓冲区内容
+            if !buffer.is_empty()
+                && let Some(msg) = self
+                    .send_element_slice(msg_type, target_id, &buffer)
+                    .await?
+            {
+                sent_messages.push(msg);
+            }
+
+            // 兜底：如果没有任何消息生成但内容不为空（防止静默失败）
+            if sent_messages.is_empty() && !content.is_empty() {
+                let ob_message = json!([{ "type": "text", "data": { "text": content } }]);
+                let msg_id = self
+                    .send_onebot_msg(msg_type, target_id, ob_message)
+                    .await?;
+                sent_messages.push(Message {
+                    id: msg_id,
+                    content: content.to_string(),
+                    ..Default::default()
+                });
+            }
+        }
+
+        // --- 主动推送 message-created 事件 ---
+        // 获取 Context (需要 clone 避免持有读锁)
+        let ctx_opt = self.inner.context.read().await.clone();
+        if let Some(ctx) = ctx_opt {
+            // 获取当前 Bot ID (取第一个活跃连接，如果没有则默认)
+            let self_id = self
+                .inner
+                .connections
+                .read()
+                .await
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+
+            let login = self.get_cached_login(&self_id).await;
+
+            for mut msg in sent_messages.clone() {
+                // 补全 Message 内部的时间 (如果 API 没返回，用当前时间)
+                if msg.created_at.is_none() {
+                    msg.created_at = Some(chrono::Utc::now().timestamp_millis());
+                }
+                // 补全 Message 的 User
+                if let Some(u) = &login.user {
+                    msg.user = Some(u.clone());
+                }
+
+                // 补全 Guild/Channel 信息
+                if msg_type == "group" {
+                    let mut guild = Guild::new(target_id.to_string());
+                    guild.avatar = Some(format!(
+                        "http://p.qlogo.cn/gh/{}/{}/640/",
+                        target_id, target_id
+                    ));
+                    msg.guild = Some(guild);
+                    msg.channel = Some(Channel::new(target_id.to_string(), ChannelType::Text));
+                } else {
+                    msg.channel = Some(Channel::new(
+                        format!("private:{}", target_id),
+                        ChannelType::Direct,
+                    ));
+                }
+
+                let mut event = Event::message_created(msg);
+                event.login = Some(login.clone());
+                event.platform_type = Some(msg_type.to_string());
+                event.timestamp = chrono::Utc::now().timestamp_millis();
+
+                // 设置 User (Sender)
+                if let Some(u) = &login.user {
+                    event.user = Some(u.clone());
+                }
+
+                let _ = ctx.event_tx.send(event).await;
+            }
+        }
+
+        Ok(sent_messages)
     }
 
     async fn delete_message(&self, _channel_id: &str, message_id: &str) -> AyjxResult<()> {
@@ -403,8 +571,6 @@ impl Adapter for NapCatAdapter {
         _limit: Option<usize>,
     ) -> AyjxResult<BidiPagedList<Message>> {
         let (msg_type, target_id) = parse_channel_id(channel_id);
-
-        // Satori 的 next 通常是分页 token，这里映射为 OneBot 的 message_seq (起始序号)
         let resp = if msg_type == "private" {
             self.get_friend_msg_history(target_id, next, Some(20), None, None)
                 .await?
@@ -416,7 +582,6 @@ impl Adapter for NapCatAdapter {
         let mut messages = Vec::new();
         if let Some(list) = resp["messages"].as_array() {
             for item in list {
-                // 简单的转换，实际可能需要复用 convert_message_event 的逻辑
                 let msg = Message {
                     id: item["message_id"].to_string(),
                     content: parse_onebot_message(&item["message"]),
@@ -452,7 +617,6 @@ impl Adapter for NapCatAdapter {
     async fn list_friends(&self, _next: Option<&str>) -> AyjxResult<PagedList<User>> {
         let resp = self.get_friend_list(None, None).await?;
         let mut users = Vec::new();
-        // get_friend_list 返回的是 Vec<Value>
         for item in resp {
             users.push(User {
                 id: item["user_id"].to_string(),
@@ -477,7 +641,6 @@ impl Adapter for NapCatAdapter {
         approve: bool,
         comment: Option<&str>,
     ) -> AyjxResult<()> {
-        // message_id 在好友申请事件中对应 flag
         self.set_friend_add_request(message_id, approve, comment.unwrap_or(""), None)
             .await
     }
@@ -487,11 +650,9 @@ impl Adapter for NapCatAdapter {
     async fn get_channel(&self, channel_id: &str) -> AyjxResult<Channel> {
         let (ctype, target_id) = parse_channel_id(channel_id);
         if ctype == "private" {
-            // 私聊视作 Direct 频道
             return Ok(Channel::new(channel_id, ChannelType::Direct));
         }
 
-        // 群组视作 Text 频道
         let resp = self.get_group_info(target_id, None).await?;
         Ok(Channel {
             id: channel_id.to_string(),
@@ -686,13 +847,22 @@ impl NapCatAdapter {
         reconnect_interval_ms: u64,
         ctx: AdapterContext,
     ) {
+        // 如果 access_token 为 None 或空字符串，则不启动连接任务
+        let has_token = access_token
+            .as_ref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+
+        if !has_token {
+            return;
+        }
+
         let inner = self.inner.clone();
 
         tokio::spawn(async move {
             loop {
                 match Self::ws_forward_connect(&url, &access_token, &inner, &ctx).await {
                     Ok(self_id) => {
-                        println!("[NapCat] WS 连接断开 (bot: {})", self_id);
                         inner.remove_connection(&self_id).await;
                     }
                     Err(e) => {
@@ -728,8 +898,6 @@ impl NapCatAdapter {
             .await
             .map_err(|e| format!("WebSocket connect failed: {}", e))?;
 
-        println!("[NapCat] 正向 WS 连接成功: {}", url);
-
         let (mut write, mut read) = ws_stream.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -743,6 +911,9 @@ impl NapCatAdapter {
         });
 
         let mut self_id_cache = String::new();
+        let temp_adapter = NapCatAdapter {
+            inner: inner.clone(),
+        };
 
         // 接收循环
         while let Some(Ok(msg)) = read.next().await {
@@ -766,16 +937,42 @@ impl NapCatAdapter {
                         inner
                             .register_connection(self_id_cache.clone(), BotSender::Ws(tx.clone()))
                             .await;
+
+                        // --- 生命周期：登录创建 ---
+                        let mut login = Login::new("qq", "napcat");
+                        login.user = Some(User::new(self_id_cache.clone()));
+                        login.status = LoginStatus::Online;
+
+                        let _ = ctx.event_tx.send(Event::login_added(login.clone())).await;
+                        let _ = ctx.event_tx.send(Event::login_updated(login)).await;
+
+                        let adapter_clone = NapCatAdapter {
+                            inner: inner.clone(),
+                        };
+                        let sid_clone = self_id_cache.clone();
+
+                        tokio::spawn(async move {
+                            adapter_clone.update_login_info(sid_clone.clone()).await;
+                        });
                     }
                 }
 
-                // 处理事件
-                if json.get("post_type").is_some()
-                    && let Some(event) = onebot_event_to_satori(json, Some(self_id_cache.clone()))
-                {
-                    let _ = ctx.event_tx.send(event).await;
+                if json.get("post_type").is_some() {
+                    let login = temp_adapter.get_cached_login(&self_id_cache).await;
+                    if let Some(event) = onebot_event_to_satori(json, login) {
+                        let _ = ctx.event_tx.send(event).await;
+                    }
                 }
             }
+        }
+
+        // --- 生命周期：连接断开 ---
+        if !self_id_cache.is_empty() {
+            let mut login = temp_adapter.get_cached_login(&self_id_cache).await;
+            login.status = LoginStatus::Offline;
+
+            let _ = ctx.event_tx.send(Event::login_updated(login.clone())).await;
+            let _ = ctx.event_tx.send(Event::login_removed(login)).await;
         }
 
         Ok(self_id_cache)
@@ -789,6 +986,16 @@ impl NapCatAdapter {
         access_token: Option<String>,
         ctx: AdapterContext,
     ) {
+        // 如果 access_token 为 None 或空字符串，则不启动监听任务
+        let has_token = access_token
+            .as_ref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+
+        if !has_token {
+            return;
+        }
+
         let inner = self.inner.clone();
 
         tokio::spawn(async move {
@@ -807,28 +1014,23 @@ impl NapCatAdapter {
                 }
             };
 
-            println!("[NapCat] 反向 WS 服务器监听于 {}", addr);
-
             while let Ok((stream, peer_addr)) = listener.accept().await {
                 let inner = inner.clone();
                 let ctx = ctx.clone();
                 let token = access_token.clone();
 
                 tokio::spawn(async move {
-                    // 验证 access_token 的回调函数
                     let callback = |req: &Request,
                                     mut res: Response|
                      -> Result<Response, ErrorResponse> {
                         if let Some(token) = &token {
                             let headers = req.headers();
-                            // 1. 检查 HTTP Header: Authorization: Bearer <token>
                             let auth_ok = headers
                                 .get("Authorization")
                                 .and_then(|v| v.to_str().ok())
                                 .map(|v| v == format!("Bearer {}", token))
                                 .unwrap_or(false);
 
-                            // 2. 检查 Query Parameter: access_token=<token>
                             let query_ok = req
                                 .uri()
                                 .query()
@@ -843,16 +1045,13 @@ impl NapCatAdapter {
                         Ok(res)
                     };
 
-                    // 使用 accept_hdr_async 进行带回调的握手
                     let ws_stream = match accept_hdr_async(stream, callback).await {
                         Ok(ws) => ws,
                         Err(e) => {
-                            println!("[NapCat] WS 握手失败 {}: {}", peer_addr, e);
+                            eprintln!("[NapCat] WS 握手失败 {}: {}", peer_addr, e);
                             return;
                         }
                     };
-
-                    println!("[NapCat] 反向 WS 客户端连接: {}", peer_addr);
 
                     let (mut write, mut read) = ws_stream.split();
                     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -867,6 +1066,9 @@ impl NapCatAdapter {
                     });
 
                     let mut self_id = String::new();
+                    let temp_adapter = NapCatAdapter {
+                        inner: inner.clone(),
+                    };
 
                     while let Some(Ok(msg)) = read.next().await {
                         if let WsMessage::Text(text) = msg
@@ -892,147 +1094,50 @@ impl NapCatAdapter {
                                             BotSender::Ws(tx.clone()),
                                         )
                                         .await;
+
+                                    // --- 生命周期：登录创建 ---
+                                    let mut login = Login::new("qq", "napcat");
+                                    login.user = Some(User::new(self_id.clone()));
+                                    login.status = LoginStatus::Online;
+
+                                    let _ =
+                                        ctx.event_tx.send(Event::login_added(login.clone())).await;
+                                    let _ = ctx.event_tx.send(Event::login_updated(login)).await;
+
+                                    let adapter_clone = NapCatAdapter {
+                                        inner: inner.clone(),
+                                    };
+                                    let sid_clone = self_id.clone();
+
+                                    tokio::spawn(async move {
+                                        adapter_clone.update_login_info(sid_clone.clone()).await;
+                                    });
                                 }
                             }
 
                             // 处理事件
-                            if json.get("post_type").is_some()
-                                && let Some(event) =
-                                    onebot_event_to_satori(json, Some(self_id.clone()))
-                            {
-                                let _ = ctx.event_tx.send(event).await;
+                            if json.get("post_type").is_some() {
+                                let login = temp_adapter.get_cached_login(&self_id).await;
+                                if let Some(event) = onebot_event_to_satori(json, login) {
+                                    let _ = ctx.event_tx.send(event).await;
+                                }
                             }
                         }
                     }
 
+                    // --- 生命周期：连接断开 ---
                     if !self_id.is_empty() {
+                        let mut login = temp_adapter.get_cached_login(&self_id).await;
+                        login.status = LoginStatus::Offline;
+
+                        let _ = ctx.event_tx.send(Event::login_updated(login.clone())).await;
+                        let _ = ctx.event_tx.send(Event::login_removed(login)).await;
+
                         inner.remove_connection(&self_id).await;
                     }
-                    println!("[NapCat] 反向 WS 客户端断开: {}", peer_addr);
                 });
             }
         });
-    }
-
-    /// HTTP 模式
-    fn start_http(
-        &self,
-        api_url: String,
-        event_port: Option<u16>,
-        access_token: Option<String>,
-        secret: Option<String>,
-        ctx: AdapterContext,
-    ) {
-        let inner = self.inner.clone();
-
-        // 注册 HTTP 发送端
-        let sender = BotSender::Http {
-            client: reqwest::Client::new(),
-            api_url: api_url.clone(),
-            access_token: access_token.clone(),
-        };
-
-        tokio::spawn({
-            let inner = inner.clone();
-            async move {
-                inner.register_connection("http".to_string(), sender).await;
-            }
-        });
-
-        // 启动事件接收服务器
-        if let Some(port) = event_port {
-            tokio::spawn(async move {
-                use axum::{
-                    Router,
-                    body::Bytes,
-                    extract::State,
-                    http::{HeaderMap, StatusCode},
-                    routing::post,
-                };
-                use hmac::{Hmac, Mac};
-                use sha1::Sha1;
-
-                #[derive(Clone)]
-                struct AppState {
-                    event_tx: mpsc::Sender<Event>,
-                    secret: Option<String>,
-                }
-
-                async fn handle_event(
-                    State(state): State<AppState>,
-                    headers: HeaderMap,
-                    body_bytes: Bytes,
-                ) -> Result<&'static str, StatusCode> {
-                    // 验证 HMAC-SHA1 签名
-                    if let Some(secret) = &state.secret {
-                        let signature = headers.get("X-Signature").and_then(|v| v.to_str().ok());
-
-                        // 获取 sha1=... 中的 hash 部分
-                        let provided_sig = match signature {
-                            Some(s) => {
-                                if let Some(sig) = s.strip_prefix("sha1=") {
-                                    sig
-                                } else {
-                                    return Err(StatusCode::BAD_REQUEST);
-                                }
-                            }
-                            None => return Err(StatusCode::UNAUTHORIZED),
-                        };
-
-                        type HmacSha1 = Hmac<Sha1>;
-                        let mut mac = HmacSha1::new_from_slice(secret.as_bytes())
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                        mac.update(&body_bytes);
-                        let result = mac.finalize().into_bytes();
-                        let expected_sig = hex::encode(result);
-
-                        if provided_sig != expected_sig {
-                            println!("[NapCat] HTTP 事件签名验证失败");
-                            return Err(StatusCode::FORBIDDEN);
-                        }
-                    }
-
-                    // 解析 JSON
-                    let json: Value =
-                        serde_json::from_slice(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-                    let self_id = headers
-                        .get("X-Self-ID")
-                        .and_then(|v| v.to_str().ok())
-                        .map(String::from)
-                        .or_else(|| json["self_id"].as_i64().map(|i| i.to_string()));
-
-                    if let Some(event) = onebot_event_to_satori(json, self_id) {
-                        let _ = state.event_tx.send(event).await;
-                    }
-
-                    Ok("")
-                }
-
-                let state = AppState {
-                    event_tx: ctx.event_tx.clone(),
-                    secret,
-                };
-
-                let app = Router::new()
-                    .route("/", post(handle_event))
-                    .with_state(state);
-
-                let addr = format!("0.0.0.0:{}", port);
-                println!("[NapCat] HTTP 事件服务器监听于 {}", addr);
-
-                match tokio::net::TcpListener::bind(&addr).await {
-                    Ok(listener) => {
-                        if let Err(e) = axum::serve(listener, app).await {
-                            eprintln!("[NapCat] HTTP 事件服务器运行错误: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[NapCat] HTTP 事件服务器启动失败: {}", e);
-                    }
-                }
-            });
-        }
     }
 }
 
@@ -1041,28 +1146,19 @@ impl NapCatAdapter {
 // ============================================================================
 
 /// 将 OneBot 事件转换为 Satori 事件
-pub fn onebot_event_to_satori(json: Value, self_id: Option<String>) -> Option<Event> {
+pub fn onebot_event_to_satori(json: Value, login: Login) -> Option<Event> {
     let post_type = json["post_type"].as_str()?;
     let time = json["time"].as_i64().unwrap_or(0) * 1000;
 
-    // 优先使用事件中的 self_id
-    let self_id = json["self_id"]
-        .as_i64()
-        .map(|i| i.to_string())
-        .or(self_id)?;
-
-    // 构建当前的 Login 状态信息
-    let login = Login {
-        platform: Some("qq".to_string()),
-        adapter: Some("napcat".to_string()),
-        status: LoginStatus::Online,
-        user: Some(User::new(self_id.clone())),
-        ..Default::default()
-    };
+    let self_id = login.user.as_ref()?.id.clone();
 
     // 执行转换
     let mut event = match post_type {
-        "message" | "message_sent" => convert_message_event(&json, time),
+        // 标准消息事件 -> message-created
+        "message" => convert_message_event(&json, time, &self_id, event_types::MESSAGE_CREATED),
+        // 自身发送/回显事件 -> message-sent (自定义类型，区别于 message-created)
+        // 这样既保留了服务端同步过来的自身消息，又不会与 Adapter 层主动推送的事件 ID 冲突或语义混淆
+        "message_sent" => convert_message_event(&json, time, &self_id, "message-sent"),
         "notice" => convert_notice_event(&json, time),
         "request" => convert_request_event(&json, time),
         "meta_event" => convert_meta_event(&json, time),
@@ -1076,96 +1172,127 @@ pub fn onebot_event_to_satori(json: Value, self_id: Option<String>) -> Option<Ev
     Some(event)
 }
 
-/// 处理消息事件
-fn convert_message_event(json: &Value, time: i64) -> Option<Event> {
-    let msg_type = json["message_type"].as_str()?;
+/// 尝试从 JSON 中获取字符串或数字并转为 String
+fn get_id_string(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(|s| s.to_string())
+        .or_else(|| v.as_i64().map(|i| i.to_string()))
+}
 
-    // 处理 message_id
-    let message_id = json["message_id"]
-        .as_i64()
-        .map(|i| i.to_string())
-        .or_else(|| json["message_id"].as_str().map(|s| s.to_string()))
+/// 处理消息事件 (包含 message 和 message_sent)
+/// 增加 event_type 参数以区分标准消息和自身发送的消息
+fn convert_message_event(
+    json: &Value,
+    time: i64,
+    self_id: &str,
+    event_type: &str,
+) -> Option<Event> {
+    let mut event = Event::new(event_type);
+    // 1. 基础字段校验
+    let msg_type = json.get("message_type")?.as_str()?;
+
+    // 解析 message_id，默认 "0"
+    let message_id = json
+        .get("message_id")
+        .and_then(get_id_string)
         .unwrap_or_else(|| "0".to_string());
 
     let content = parse_onebot_message(&json["message"]);
 
-    // --- 用户信息解析 ---
-    let mut user_id = String::new();
-    let mut nickname = String::new();
-    let mut avatar = None;
-    let mut is_anonymous = false;
+    // --- 2. 用户信息解析 ---
+    // 返回元组: (user_id, nickname, role, is_anonymous)
+    let (user_id, nickname, role_id, is_anonymous) =
+        if let Some(anon) = json.get("anonymous").and_then(|v| v.as_object()) {
+            // 匿名消息处理
+            let uid = anon
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            let name = anon
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            (uid, name.to_string(), String::new(), true)
+        } else {
+            // 正常消息处理
+            let uid = get_id_string(&json["user_id"])
+                .or_else(|| get_id_string(&json["sender"]["user_id"]))
+                .unwrap_or_else(|| "0".to_string());
 
-    // 1. 检查是否为匿名消息
-    if let Some(anon) = json.get("anonymous").and_then(|v| v.as_object()) {
-        is_anonymous = true;
-        if let Some(anon_id) = anon.get("id").and_then(|v| v.as_i64()) {
-            user_id = anon_id.to_string();
-        }
-        if let Some(anon_name) = anon.get("name").and_then(|v| v.as_str()) {
-            nickname = anon_name.to_string();
-        }
+            let sender = json.get("sender");
+            let name = sender
+                .and_then(|s| s.get("nickname").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let role = sender
+                .and_then(|s| s.get("role").and_then(|v| v.as_str()))
+                .unwrap_or("");
+
+            (uid, name.to_string(), role.to_string(), false)
+        };
+
+    // 头像生成
+    let avatar = if !is_anonymous && user_id != "0" && !user_id.is_empty() {
+        Some(format!("https://q1.qlogo.cn/g?b=qq&nk={}&s=640", user_id))
     } else {
-        // 2. 正常消息
-        user_id = json["user_id"]
-            .as_i64()
-            .map(|i| i.to_string())
-            .or_else(|| json["sender"]["user_id"].as_i64().map(|i| i.to_string()))
-            .unwrap_or_else(|| "0".to_string());
+        None
+    };
 
-        if let Some(sender) = json.get("sender") {
-            nickname = sender["nickname"].as_str().unwrap_or("").to_string();
-        }
-    }
-
-    // 生成头像 URL
-    if !is_anonymous && user_id != "0" && !user_id.is_empty() {
-        avatar = Some(format!("https://q1.qlogo.cn/g?b=qq&nk={}&s=640", user_id));
-    }
-
-    // 构建 Satori User
+    // 构建 User 对象
     let mut user = User::new(user_id.clone());
+    user.is_bot = Some(user_id == self_id);
+    user.avatar = avatar.clone();
     if !nickname.is_empty() {
         user.name = Some(nickname.clone());
         user.nick = Some(nickname.clone());
     }
-    user.avatar = avatar.clone();
-    user.is_bot = Some(false);
 
-    // 构建 Satori Message
+    // 构建 GuildMember 对象
+    let member = GuildMember {
+        user: Some(user.clone()),
+        avatar: avatar.clone(),
+        nick: if !nickname.is_empty() {
+            Some(nickname)
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+
+    // --- 3. 消息与频道构建 ---
     let mut msg = Message::new(message_id, content);
     msg.user = Some(user.clone());
     msg.created_at = Some(time);
+    event.user = Some(user);
 
-    // --- 频道/群组信息解析 ---
+    // 根据消息类型处理 Guild/Channel 信息
     if msg_type == "group" {
-        let group_id = json["group_id"]
-            .as_i64()
-            .map(|i| i.to_string())
+        let group_id = json
+            .get("group_id")
+            .and_then(get_id_string)
             .unwrap_or_else(|| "0".to_string());
 
-        msg.guild = Some(Guild::new(group_id.clone()));
-        msg.channel = Some(Channel::new(
-            format!("group:{}", group_id),
-            ChannelType::Text,
+        let group_name = json
+            .get("group_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // 构建 Guild
+        let mut guild = Guild::new(group_id.clone());
+        guild.name = group_name.clone();
+        guild.avatar = Some(format!(
+            "http://p.qlogo.cn/gh/{}/{}/640/",
+            group_id, group_id
         ));
 
-        let mut member = GuildMember {
-            user: Some(user.clone()),
-            avatar: avatar.clone(),
-            ..Default::default()
-        };
+        msg.guild = Some(guild.clone());
+        event.guild = Some(guild);
 
-        if let Some(sender) = json.get("sender")
-            && let Some(card) = sender["card"].as_str()
-            && !card.is_empty()
-        {
-            member.nick = Some(card.to_string());
-        }
-
-        if is_anonymous {
-            member.nick = Some(nickname.clone());
-        }
-
+        // 构建 Channel
+        let mut channel = Channel::new(group_id, ChannelType::Text);
+        channel.name = group_name;
+        msg.channel = Some(channel.clone());
+        event.channel = Some(channel);
         msg.member = Some(member);
     } else {
         // 私聊
@@ -1175,9 +1302,15 @@ fn convert_message_event(json: &Value, time: i64) -> Option<Event> {
         ));
     }
 
-    let mut event = Event::message_created(msg);
+    // --- 4. 补充 Event ---
+    event.message = Some(msg);
     event.platform_type = Some(msg_type.to_string());
     event.timestamp = time;
+
+    if !role_id.is_empty() && msg_type == "group" {
+        event.role = Some(GuildRole::new(role_id));
+    }
+
     Some(event)
 }
 
@@ -1205,14 +1338,13 @@ fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
             }
         }
 
-        // 消息撤回
+        // 消息撤回 (好友/群)
         "group_recall" | "friend_recall" => (event_types::MESSAGE_DELETED, notice_type),
 
         // 好友增加
         "friend_add" => ("friend-added", "friend_add"),
 
         // 群禁言 -> 成员更新
-        // 注意：通过 platform_type="group_ban" 和 platform_data["duration"] 来区分和处理
         "group_ban" => (event_types::GUILD_MEMBER_UPDATED, "group_ban"),
 
         // 群管理员变动 -> 成员更新
@@ -1221,15 +1353,21 @@ fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
         // 群名片变更 -> 成员更新
         "group_card" => (event_types::GUILD_MEMBER_UPDATED, "group_card"),
 
-        // 戳一戳等 Notify
+        // 扩展通知 (戳一戳, 荣誉, 头衔, 点赞, 输入状态)
         "notify" => match sub_type {
             Some("poke") => ("interaction/poke", "notify/poke"),
             Some("lucky_king") => ("interaction/lucky_king", "notify/lucky_king"),
             Some("honor") => (event_types::GUILD_MEMBER_UPDATED, "notify/honor"),
+            // NapCat 补充事件：群成员头衔变更
+            Some("title") => (event_types::GUILD_MEMBER_UPDATED, "notify/title"),
+            // NapCat 补充事件：点赞
+            Some("profile_like") => ("interaction/like", "notify/profile_like"),
+            // NapCat 补充事件：输入状态更新
+            Some("input_status") => ("interaction/typing", "notify/input_status"),
             _ => return None, // 未知通知忽略
         },
 
-        // 表情回应
+        // 表情回应 (NapCat 仅收自己的，其余扩展接口拉取)
         "group_msg_emoji_like" => (event_types::REACTION_ADDED, "group_msg_emoji_like"),
 
         // 精华消息
@@ -1278,11 +1416,12 @@ fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
     // 1. 填充 Guild 和 Channel
     if let Some(gid) = json["group_id"].as_i64() {
         let gid_str = gid.to_string();
-        event.guild = Some(Guild::new(gid_str.clone()));
-        event.channel = Some(Channel::new(
-            format!("group:{}", gid_str),
-            ChannelType::Text,
-        ));
+
+        let mut guild = Guild::new(gid_str.clone());
+        guild.avatar = Some(format!("http://p.qlogo.cn/gh/{}/{}/640/", gid_str, gid_str));
+        event.guild = Some(guild);
+
+        event.channel = Some(Channel::new(gid_str, ChannelType::Text));
     }
 
     // 2. 填充 User (事件主体) 和 Operator (操作者)
@@ -1297,16 +1436,38 @@ fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
         if let Some(target) = json["target_id"].as_i64() {
             main_user_id = Some(target); // 被戳者
         }
-        if main_user_id.is_none() {
-            main_user_id = operator_id; // 兜底
-        }
         // user_id 在 poke 里其实是 operator
         operator_id = json["user_id"].as_i64();
     }
 
+    if notice_type == "group_msg_emoji_like" {
+        operator_id = json["user_id"].as_i64();
+        event.message = Some(Message {
+            id: json["message_id"].as_i64().unwrap_or(0).to_string(),
+            content: match json["likes"].as_array() {
+                Some(arr) if !arr.is_empty() => {
+                    let emoji_id = arr[0]
+                        .get("emoji_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0");
+                    format!(r#"<face id="{}"/>"#, emoji_id)
+                }
+                _ => String::new(),
+            },
+            ..Default::default()
+        });
+        main_user_id = None;
+    }
+
     // 设置 User
     if let Some(uid) = main_user_id {
-        event.user = Some(User::new(uid.to_string()));
+        let mut user = User::new(uid.to_string());
+        user.is_bot = Some(user.id == json["self_id"].as_i64().unwrap_or(0).to_string());
+        event.user = Some(user.clone());
+        event.member = Some(GuildMember {
+            user: Some(user.clone()),
+            ..Default::default()
+        });
     }
 
     // 设置 Operator
@@ -1319,7 +1480,12 @@ fn convert_notice_event(json: &Value, time: i64) -> Option<Event> {
             .as_ref()
             .map(|u| u.id == oid_str)
             .unwrap_or(false);
-        if !is_self || notice_type == "group_admin" || notice_type == "group_ban" {
+        // 对于管理变动、禁言等管理操作，即使是自己操作自己，记录 operator 也有意义
+        if !is_self
+            || notice_type == "group_admin"
+            || notice_type == "group_ban"
+            || sub_type == Some("poke")
+        {
             event.operator = Some(User::new(oid_str));
         }
     }
@@ -1376,7 +1542,6 @@ fn convert_request_event(json: &Value, time: i64) -> Option<Event> {
 fn convert_meta_event(json: &Value, time: i64) -> Option<Event> {
     let meta_type = json["meta_event_type"].as_str()?;
 
-    // 这里简单处理生命周期，心跳通常忽略
     match meta_type {
         "lifecycle" => {
             let sub_type = json["sub_type"].as_str().unwrap_or("connect");
@@ -1390,6 +1555,8 @@ fn convert_meta_event(json: &Value, time: i64) -> Option<Event> {
             event.timestamp = time;
             Some(event)
         }
+        // 心跳事件通常用于保活，不转换为 Satori 业务事件
+        "heartbeat" => None,
         _ => None,
     }
 }
@@ -1510,70 +1677,7 @@ fn parse_onebot_message(message: &Value) -> String {
     result
 }
 
-/// 构建合并转发节点列表 (Helper)
-fn build_forward_nodes(elements: &[Element]) -> Vec<Value> {
-    let mut nodes = Vec::new();
-
-    for elem in elements {
-        match elem {
-            // 情况1: 引用已有消息进行转发
-            // <message id="123456" /> 或 <message id="123456" forward />
-            Element::Message {
-                id: Some(msg_id), ..
-            } => {
-                nodes.push(json!({
-                    "type": "node",
-                    "data": {
-                        "id": msg_id
-                    }
-                }));
-            }
-            // 情况2: 自定义伪造消息 (嵌套内容)
-            // <message><author id="..." name="..." /> content...</message>
-            Element::Message {
-                id: None, children, ..
-            } => {
-                // 默认 Author 信息
-                let mut user_id = "0".to_string();
-                let mut nickname = "Unknown".to_string();
-                let mut content_elems = Vec::new();
-
-                // 遍历子元素，分离 Author 和 实际消息内容
-                for child in children {
-                    if let Element::Author { id, name, .. } = child {
-                        if let Some(uid) = id {
-                            user_id = uid.clone();
-                        }
-                        if let Some(nm) = name {
-                            nickname = nm.clone();
-                        }
-                        // author 标签可能包含 avatar，但 OneBot node 节点主要关注 id 和 name
-                    } else {
-                        content_elems.push(child.clone());
-                    }
-                }
-
-                // 将内容元素转换为 OneBot 消息段数组
-                let mut content_arr = Vec::new();
-                process_elements_to_onebot(&content_elems, &mut content_arr);
-
-                nodes.push(json!({
-                    "type": "node",
-                    "data": {
-                        "user_id": user_id, // NapCat 兼容字符串格式的数字 ID
-                        "nickname": nickname,
-                        "content": content_arr
-                    }
-                }));
-            }
-            // 忽略其他非 message 标签 (Satori 规范中合并转发应包裹在 message 元素内)
-            _ => {}
-        }
-    }
-    nodes
-}
-
-/// Satori XML -> OneBot 消息数组 (入口)
+/// Satori XML -> OneBot 消息数组 (入口 - 处理纯字符串)
 fn satori_to_onebot(content: &str) -> Value {
     // 如果内容不包含 XML 标签特征字符，直接作为纯文本处理。
     if !content.contains('<') && !content.contains('>') {
@@ -1588,13 +1692,11 @@ fn satori_to_onebot(content: &str) -> Value {
     }
 
     let elements = message_elements::parse(content);
-    let mut arr = Vec::new();
+    let result = elements_to_onebot(&elements);
 
-    // 递归处理
-    process_elements_to_onebot(&elements, &mut arr);
-
-    // 二次防护：检测解析器吞字现象 (保持原有逻辑)
-    if arr.len() == 1
+    // 二次防护：检测解析器吞字现象
+    if let Some(arr) = result.as_array()
+        && arr.len() == 1
         && let Some(obj) = arr[0].as_object()
         && let Some(type_val) = obj.get("type").and_then(|v| v.as_str())
         && type_val == "text"
@@ -1603,7 +1705,6 @@ fn satori_to_onebot(content: &str) -> Value {
         && text_val.len() < content.len() * 7 / 10
         && !content.is_empty()
     {
-        println!("[NapCat] 检测到潜在的 XML 解析文本丢失，回退为纯文本模式");
         return json!([
             {
                 "type": "text",
@@ -1614,18 +1715,13 @@ fn satori_to_onebot(content: &str) -> Value {
         ]);
     }
 
-    // 二次防护：空结果回退
-    if arr.is_empty() && !content.is_empty() {
-        return json!([
-            {
-                "type": "text",
-                "data": {
-                    "text": content
-                }
-            }
-        ]);
-    }
+    result
+}
 
+/// Satori Elements -> OneBot 消息数组 (供 send_message 分段调用)
+fn elements_to_onebot(elements: &[Element]) -> Value {
+    let mut arr = Vec::new();
+    process_elements_to_onebot(elements, &mut arr);
     json!(arr)
 }
 
@@ -1673,7 +1769,8 @@ fn process_elements_to_onebot(elements: &[Element], arr: &mut Vec<Value>) {
             } => {
                 // 1. 处理合并转发 (forward=true)
                 if *forward {
-                    // Case A: 引用已有的转发消息 ID (forward by id)
+                    // 情况 A: 引用已有的转发消息 ID (Forward by ID)
+                    // <message forward id="..."/>
                     if let Some(forward_id) = id
                         && !forward_id.is_empty()
                     {
@@ -1683,62 +1780,84 @@ fn process_elements_to_onebot(elements: &[Element], arr: &mut Vec<Value>) {
                                 "id": forward_id
                             }
                         }));
-                        // 引用转发通常是单独的消息体，但也允许和其他消息混合，这里继续处理后续元素
-                        continue;
                     }
-
-                    // Case B: 自定义内容的合并转发 (custom nodes)
-                    // Satori 结构: <message forward><message>content...</message><message>...</message></message>
-                    for child in children {
-                        // 每一个子 message 对应一个 OneBot node
-                        if let Element::Message {
-                            children: sub_children,
-                            ..
-                        } = child
-                        {
-                            // 提取 <author> 信息 和 实际内容
-                            let mut nickname = "Unknown".to_string();
-                            let mut user_id = "10000".to_string(); // 默认兜底ID
-                            let mut node_content_elems = Vec::new();
-
-                            for sub in sub_children {
-                                if let Element::Author {
-                                    id: auth_id,
-                                    name: auth_name,
-                                    ..
-                                } = sub
+                    // 情况 B: 自定义合并转发内容 (Custom Merged Forward)
+                    // <message forward><message>...</message><message>...</message></message>
+                    else {
+                        for child in children {
+                            // Satori 规范：合并转发中的每一条消息都由 <message> 包裹
+                            if let Element::Message {
+                                id: node_msg_id,
+                                children: node_children,
+                                ..
+                            } = child
+                            {
+                                // 子节点类型 1: 引用消息 (通过 ID)
+                                // <message id="123456"/>
+                                if let Some(nid) = node_msg_id
+                                    && !nid.is_empty()
                                 {
-                                    if let Some(nid) = auth_id {
-                                        user_id = nid.clone();
-                                    }
-                                    if let Some(nname) = auth_name {
-                                        nickname = nname.clone();
-                                    }
-                                } else {
-                                    node_content_elems.push(sub.clone());
+                                    arr.push(json!({
+                                        "type": "node",
+                                        "data": {
+                                            "id": nid
+                                        }
+                                    }));
                                 }
-                            }
+                                // 子节点类型 2: 自定义/伪造消息
+                                // <message><author .../> content...</message>
+                                else {
+                                    let mut user_id = "0".to_string(); // 默认 ID
+                                    let mut nickname = "匿名".to_string(); // 默认昵称
+                                    let mut content_elems = Vec::new();
 
-                            // 递归解析节点内的内容
-                            let mut node_content_arr = Vec::new();
-                            process_elements_to_onebot(&node_content_elems, &mut node_content_arr);
-
-                            // 仅当内容不为空时添加节点
-                            if !node_content_arr.is_empty() {
-                                arr.push(json!({
-                                    "type": "node",
-                                    "data": {
-                                        "user_id": user_id,
-                                        "nickname": nickname,
-                                        "content": node_content_arr
+                                    // 分离 <author> 和实际内容
+                                    for sub in node_children {
+                                        if let Element::Author {
+                                            id: auth_id,
+                                            name: auth_name,
+                                            ..
+                                        } = sub
+                                        {
+                                            if let Some(uid) = auth_id {
+                                                user_id = uid.clone();
+                                            }
+                                            if let Some(nm) = auth_name {
+                                                nickname = nm.clone();
+                                            }
+                                        } else {
+                                            content_elems.push(sub.clone());
+                                        }
                                     }
-                                }));
+
+                                    // 递归解析节点内部的内容
+                                    let mut node_content_arr = Vec::new();
+                                    process_elements_to_onebot(
+                                        &content_elems,
+                                        &mut node_content_arr,
+                                    );
+
+                                    // 只有内容不为空时才生成节点
+                                    if !node_content_arr.is_empty() {
+                                        arr.push(json!({
+                                            "type": "node",
+                                            "data": {
+                                                "user_id": user_id,
+                                                "nickname": nickname,
+                                                "content": node_content_arr
+                                            }
+                                        }));
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
                     // 2. 普通消息容器 (forward=false)
-                    // 仅作为分组容器，直接展平处理子元素
+                    // <message>content</message>
+                    // 在 OneBot 消息链中，我们将其子元素平铺 (Flatten)。
+                    // 这样 <message>A</message><message>B</message> 如果在 send_message 中被分开处理，
+                    // 则各自调用此函数；如果在递归中遇到嵌套的无属性 <message>，则解包。
                     process_elements_to_onebot(children, arr);
                 }
             }
@@ -1784,7 +1903,7 @@ fn process_elements_to_onebot(elements: &[Element], arr: &mut Vec<Value>) {
                 arr.push(json!({"type": "text", "data": {"text": text}}));
             }
 
-            // 忽略 Author 标签 (它应该在 Element::Message 的处理逻辑中被消耗掉，如果出现在这里说明位置不对或无需处理)
+            // Author 标签由父级 Message 节点处理，如果单独出现则忽略
             Element::Author { .. } => {}
 
             _ => {
@@ -1797,7 +1916,7 @@ fn process_elements_to_onebot(elements: &[Element], arr: &mut Vec<Value>) {
     }
 }
 
-/// 辅助函数：转义 XML 特殊字符 (用于文件消息构建)
+/// 转义 XML 特殊字符 (用于文件消息构建)
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

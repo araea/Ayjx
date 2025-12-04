@@ -1,7 +1,4 @@
-// ================================================================================
-// Ayjx Plugin: Console Logger
-// 描述：标准的控制台日志输出插件，支持调试信息打印。
-// ================================================================================
+// plugin_logger.rs
 
 use ayjx::prelude::*;
 use chrono::Local;
@@ -17,8 +14,6 @@ pub struct LoggerConfig {
     pub time_format: String,
     #[serde(default)]
     pub debug: bool,
-    #[serde(default)]
-    pub show_internal: bool,
 }
 
 impl Default for LoggerConfig {
@@ -26,7 +21,6 @@ impl Default for LoggerConfig {
         Self {
             time_format: "%H:%M:%S".to_string(),
             debug: false,
-            show_internal: false,
         }
     }
 }
@@ -39,7 +33,6 @@ fn default_time_format() -> String {
 // 2. 插件实现
 // ============================================================================
 
-// 重命名结构体以符合功能语义
 pub struct ConsoleLoggerPlugin;
 
 impl ConsoleLoggerPlugin {
@@ -78,12 +71,10 @@ impl ConsoleLoggerPlugin {
 
 #[async_trait]
 impl Plugin for ConsoleLoggerPlugin {
-    // ID 改为 ayjx_console_logger，更具辨识度
     fn id(&self) -> &str {
-        "ayjx_console_logger"
+        "console_logger"
     }
 
-    // 显示名称改为 Console Logger，一目了然
     fn name(&self) -> &str {
         "Console Logger"
     }
@@ -93,11 +84,11 @@ impl Plugin for ConsoleLoggerPlugin {
     }
 
     fn version(&self) -> &str {
-        "1.1.0"
+        "1.2.1"
     }
 
     fn priority(&self) -> i32 {
-        0 // 最高优先级
+        0
     }
 
     fn default_config(&self) -> Option<toml::Value> {
@@ -111,54 +102,79 @@ impl Plugin for ConsoleLoggerPlugin {
         }
     }
 
-    async fn on_load(&self, ctx: &PluginContext) -> AyjxResult<()> {
-        let config: LoggerConfig = ctx.plugin_config().await.unwrap_or_default();
-
-        println!(
-            "[Ayjx] 控制台日志就绪 (Time: '{}', Debug: {})",
-            config.time_format,
-            if config.debug { "ON" } else { "OFF" }
-        );
-        Ok(())
-    }
-
     async fn on_event(&self, ctx: &PluginContext, event: &Event) -> AyjxResult<EventResult> {
         let config: LoggerConfig = ctx.plugin_config().await.unwrap_or_default();
 
-        // 过滤内部事件
-        if event.event_type == event_types::INTERNAL && !config.show_internal {
+        if event.event_type == event_types::INTERNAL && !config.debug {
             return Ok(EventResult::Continue);
         }
 
         let time_str = self.gray(&Local::now().format(&config.time_format).to_string());
 
+        // 平台标签
+        let platform = event.platform().unwrap_or("sys");
+        let adapter = event.adapter().unwrap_or("core");
+        let platform_tag = self.magenta(&format!("[{}:{}]", platform, adapter));
+
         // ----------------------------------------------------------------
-        // 消息事件处理
+        // 1. 消息事件处理 (包含发送前预处理)
         // ----------------------------------------------------------------
         if event.is_message_event() {
-            let platform = event.platform().unwrap_or("sys");
-            let adapter = event.adapter().unwrap_or("core");
-            let platform_tag = self.magenta(&format!("[{}:{}]", platform, adapter));
+            // 尝试获取群组名称：优先查 event.guild，其次查 event.message.guild
+            let guild_name = event
+                .guild
+                .as_ref()
+                .or(event.message.as_ref().and_then(|m| m.guild.as_ref()))
+                .and_then(|g| g.name.as_deref().or(Some(g.id.as_str())));
 
-            let context_tag = if let Some(guild) = &event.guild {
-                let g_name = guild.name.as_deref().unwrap_or(guild.id.as_str());
-                self.blue(&format!("[{}]", g_name))
-            } else {
+            let context_tag = if let Some(name) = guild_name {
+                self.blue(&format!("[{}]", name))
+            } else if event.message.as_ref().is_some_and(|m| m.is_direct()) {
                 self.green("[私聊]")
+            } else {
+                // Before Send 或未完全填充的情况
+                let target = event
+                    .channel_id()
+                    .or(event.message.as_ref().and_then(|m| m.channel_id()))
+                    .unwrap_or("?");
+                self.blue(&format!("[To:{}]", target))
             };
 
-            let sender_name = if let Some(member) = &event.member {
-                member.display_name().unwrap_or("Unknown").to_string()
-            } else if let Some(user) = &event.user {
+            // 尝试获取发送者名称：优先查 event.member/user，其次查 event.message.member/user
+            let member_ref = event
+                .member
+                .as_ref()
+                .or(event.message.as_ref().and_then(|m| m.member.as_ref()));
+            let user_ref = event
+                .user
+                .as_ref()
+                .or(event.message.as_ref().and_then(|m| m.user.as_ref()));
+
+            let sender_name = if let Some(member) = member_ref {
+                // 优先使用 member 的 display_name (nick > user.name)
+                // 如果 member 中没有 user 信息且 nick 为空，尝试回退到 user_ref
+                member
+                    .display_name()
+                    .map(|s| s.to_string())
+                    .or_else(|| user_ref.map(|u| u.display_name().to_string()))
+                    .unwrap_or_else(|| "Unknown".to_string())
+            } else if let Some(user) = user_ref {
                 user.display_name().to_string()
             } else {
                 "System".to_string()
             };
-            let sender_tag = self.cyan(&sender_name);
+
+            // 区分发送方向
+            let (direction_tag, sender_tag) = if event.event_type == event_types::BEFORE_SEND {
+                (self.green("<< SEND"), self.cyan("Bot"))
+            } else {
+                (String::new(), self.cyan(&sender_name))
+            };
 
             let action = match event.event_type.as_str() {
                 event_types::MESSAGE_UPDATED => self.yellow(" [编辑]"),
                 event_types::MESSAGE_DELETED => self.red(" [撤回]"),
+                event_types::BEFORE_SEND => String::new(),
                 _ => String::new(),
             };
 
@@ -168,20 +184,104 @@ impl Plugin for ConsoleLoggerPlugin {
             let clean_text = plain_text.trim();
 
             println!(
-                "{} {} {} {}{}: {}",
-                time_str, platform_tag, context_tag, sender_tag, action, clean_text
+                "{} {} {} {}{}{}: {}",
+                time_str, platform_tag, context_tag, direction_tag, sender_tag, action, clean_text
             );
         }
         // ----------------------------------------------------------------
-        // 群组事件处理
+        // 2. 交互事件 (指令、按钮、戳一戳)
+        // ----------------------------------------------------------------
+        else if event.event_type == event_types::INTERACTION_COMMAND {
+            let user_name = event.user.as_ref().map(|u| u.display_name()).unwrap_or("?");
+            if let Some(argv) = &event.argv {
+                let args_str = argv
+                    .arguments
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!(
+                    "{} {} {} 用户 {} 触发指令: {}{}",
+                    time_str,
+                    platform_tag,
+                    self.yellow("[Command]"),
+                    self.cyan(user_name),
+                    self.green(&argv.name),
+                    if args_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", args_str)
+                    }
+                );
+            }
+        } else if event.event_type == event_types::INTERACTION_BUTTON {
+            let user_name = event.user.as_ref().map(|u| u.display_name()).unwrap_or("?");
+            let btn_id = event.button.as_ref().map(|b| b.id.as_str()).unwrap_or("?");
+            println!(
+                "{} {} {} 用户 {} 点击按钮: {}",
+                time_str,
+                platform_tag,
+                self.yellow("[Button]"),
+                self.cyan(user_name),
+                self.green(btn_id)
+            );
+        } else if event.event_type == "interaction/poke" {
+            // 解析戳一戳事件
+            // operator: 发起者, user: 目标
+            let operator_name = event
+                .operator
+                .as_ref()
+                .map(|u| u.display_name())
+                .unwrap_or("?");
+            let target_name = event.user.as_ref().map(|u| u.display_name()).unwrap_or("?");
+
+            let context_tag = if let Some(g) = &event.guild {
+                let name = g.name.as_deref().unwrap_or(&g.id);
+                self.blue(&format!("[{}]", name))
+            } else {
+                self.green("[私聊]")
+            };
+
+            println!(
+                "{} {} {} {} 用户 {} 戳了戳 {}",
+                time_str,
+                platform_tag,
+                context_tag,
+                self.yellow("[Poke]"),
+                self.cyan(operator_name),
+                self.cyan(target_name)
+            );
+        }
+        // ----------------------------------------------------------------
+        // 3. 表态事件 (Reactions)
+        // ----------------------------------------------------------------
+        else if event.event_type == event_types::REACTION_ADDED
+            || event.event_type == event_types::REACTION_REMOVED
+        {
+            let operator_id = event.operator_id().unwrap_or("?");
+            let msg_id = event.message_id().unwrap_or("?");
+            let action = if event.event_type == event_types::REACTION_ADDED {
+                self.green("添加表态")
+            } else {
+                self.red("移除表态")
+            };
+            let emoji = event.content().unwrap_or("?");
+
+            println!(
+                "{} {} {} 用户 {} 对消息 {} {}: {}",
+                time_str,
+                platform_tag,
+                self.yellow("[Reaction]"),
+                self.cyan(operator_id),
+                msg_id,
+                action,
+                emoji
+            );
+        }
+        // ----------------------------------------------------------------
+        // 4. 群组/角色事件处理
         // ----------------------------------------------------------------
         else if event.is_guild_event() {
-            let platform_tag = self.magenta(&format!(
-                "[{}:{}]",
-                event.platform().unwrap_or("?"),
-                event.adapter().unwrap_or("?")
-            ));
-
             let guild_name = event
                 .guild
                 .as_ref()
@@ -202,6 +302,28 @@ impl Plugin for ConsoleLoggerPlugin {
                         self.cyan(event.user.as_ref().map(|u| u.display_name()).unwrap_or("?"))
                     )
                 }
+                event_types::GUILD_ROLE_CREATED
+                | event_types::GUILD_ROLE_UPDATED
+                | event_types::GUILD_ROLE_DELETED => {
+                    let role_name = event
+                        .role
+                        .as_ref()
+                        .and_then(|r| r.name.as_deref())
+                        .unwrap_or("?");
+                    let role_id = event.role.as_ref().map(|r| r.id.as_str()).unwrap_or("?");
+                    match event.event_type.as_str() {
+                        event_types::GUILD_ROLE_CREATED => {
+                            format!("角色创建: {} ({})", role_name, role_id)
+                        }
+                        event_types::GUILD_ROLE_UPDATED => {
+                            format!("角色更新: {} ({})", role_name, role_id)
+                        }
+                        event_types::GUILD_ROLE_DELETED => {
+                            format!("角色删除: {} ({})", role_name, role_id)
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 _ => event.event_type.clone(),
             };
 
@@ -215,7 +337,22 @@ impl Plugin for ConsoleLoggerPlugin {
             );
         }
         // ----------------------------------------------------------------
-        // 登录/连接状态
+        // 5. 好友请求
+        // ----------------------------------------------------------------
+        else if event.event_type == event_types::FRIEND_REQUEST {
+            let user_name = event.user.as_ref().map(|u| u.display_name()).unwrap_or("?");
+            let user_id = event.user.as_ref().map(|u| u.id.as_str()).unwrap_or("?");
+            println!(
+                "{} {} {} 收到来自 {} ({}) 的好友请求",
+                time_str,
+                platform_tag,
+                self.red("REQUEST"),
+                self.cyan(user_name),
+                user_id
+            );
+        }
+        // ----------------------------------------------------------------
+        // 6. 登录状态更新 (仅 Status Updated)
         // ----------------------------------------------------------------
         else if event.event_type == event_types::LOGIN_UPDATED
             && let Some(login) = &event.login
@@ -224,34 +361,46 @@ impl Plugin for ConsoleLoggerPlugin {
                 LoginStatus::Online => self.green("ONLINE"),
                 LoginStatus::Offline => self.red("OFFLINE"),
                 LoginStatus::Connect => self.yellow("CONNECTING"),
-                _ => self.yellow("STATUS"),
+                LoginStatus::Disconnect => self.red("DISCONNECTING"),
+                LoginStatus::Reconnect => self.yellow("RECONNECTING"),
             };
-            let platform_tag = self.magenta(&format!(
-                "[{}:{}]",
-                login.platform.as_deref().unwrap_or("?"),
-                login.adapter.as_deref().unwrap_or("?")
-            ));
-            println!("{} {} Bot状态变更: {}", time_str, platform_tag, status_str);
+
+            let bot_id = login.user.as_ref().map(|u| u.id.as_str()).unwrap_or("?");
+
+            println!(
+                "{} {} Bot [{}] 状态变更: {}",
+                time_str, platform_tag, bot_id, status_str
+            );
+        }
+        // ----------------------------------------------------------------
+        // 7. 其他未知事件
+        // ----------------------------------------------------------------
+        else {
+            // 可选：如果不希望打印 Login Added/Removed 事件的 "Unhandled Event"，
+            // 可以在此处添加过滤，或者上面 Login 处理逻辑显式包含但不打印
+            if event.event_type != event_types::LOGIN_ADDED
+                && event.event_type != event_types::LOGIN_REMOVED
+            {
+                println!(
+                    "{} {} Unhandled Event: {}",
+                    time_str, platform_tag, event.event_type
+                );
+            }
         }
 
         // ----------------------------------------------------------------
-        // 调试模式输出 (Updated)
+        // 8. 调试模式输出
         // ----------------------------------------------------------------
         if config.debug {
             let debug_prefix = self.gray("DEBUG");
+            println!("{} [Full Event] {:?}", debug_prefix, event);
 
-            // 1. 打印原始 XML 内容
             if let Some(content) = event.content() {
                 println!("{} [XML] {}", debug_prefix, content);
             }
 
-            // 2. 打印 Platform Data (JSON)
-            // Ayjx 理念：提供底层数据的透明度，辅助开发者排查适配器问题
             if let Some(platform_data) = &event.platform_data {
-                // 尝试转换为 JSON Value 打印
                 if let Some(json_value) = platform_data.downcast_ref::<serde_json::Value>() {
-                    // 使用 {} 打印紧凑 JSON，或用 {:#} 打印格式化 JSON。
-                    // 考虑到日志行数，这里暂时用紧凑格式，防止刷屏。
                     println!("{} [Data] {}", debug_prefix, json_value);
                 } else {
                     println!(
@@ -260,8 +409,7 @@ impl Plugin for ConsoleLoggerPlugin {
                     );
                 }
             } else {
-                // 如果需要确认 data 是否丢失，可以取消注释下面这行：
-                // println!("{} [Data] None", debug_prefix);
+                println!("{} [Data] None", debug_prefix);
             }
         }
 

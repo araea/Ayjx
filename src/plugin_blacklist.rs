@@ -1,3 +1,5 @@
+// plugin_blacklist.rs
+
 use ayjx::prelude::*;
 
 pub struct BlacklistPlugin;
@@ -20,13 +22,11 @@ impl Plugin for BlacklistPlugin {
         "1.0.0"
     }
 
-    // 设置极高的优先级（数值越小越先执行），确保在其他插件处理前拦截
     fn priority(&self) -> i32 {
         -100
     }
 
     async fn on_event(&self, ctx: &PluginContext, event: &Event) -> AyjxResult<EventResult> {
-        // 获取当前配置快照
         let cfg = ctx.config().await;
 
         // 1. 检查发送者是否在黑名单中
@@ -35,8 +35,7 @@ impl Plugin for BlacklistPlugin {
         {
             println!(
                 "[Blacklist] 拦截了黑名单用户 {} 的事件 (type: {})",
-                user_id,
-                event.event_type
+                user_id, event.event_type
             );
             return Ok(EventResult::Stop);
         }
@@ -47,8 +46,7 @@ impl Plugin for BlacklistPlugin {
         {
             println!(
                 "[Blacklist] 拦截了黑名单群组 {} 的事件 (type: {})",
-                guild_id,
-                event.event_type
+                guild_id, event.event_type
             );
             return Ok(EventResult::Stop);
         }

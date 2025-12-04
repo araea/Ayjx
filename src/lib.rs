@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 
 // ============================================================================
-// 1. Error Types (统一错误处理)
+// 1. Error Types
 // ============================================================================
 
 /// 框架核心错误类型
@@ -86,7 +86,6 @@ impl User {
 // ----------------------------------------------------------------------------
 
 /// 群组对象
-/// 参考: zh-CN/resources/guild.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Guild {
     /// 群组 ID
@@ -113,7 +112,6 @@ impl Guild {
 // ----------------------------------------------------------------------------
 
 /// 频道类型
-/// 参考: zh-CN/resources/channel.md
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[repr(i32)]
 pub enum ChannelType {
@@ -133,7 +131,6 @@ pub enum ChannelType {
 }
 
 /// 频道对象
-/// 参考: zh-CN/resources/channel.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Channel {
     /// 频道 ID
@@ -205,7 +202,6 @@ impl GuildMember {
 // ----------------------------------------------------------------------------
 
 /// 群组角色对象
-/// 参考: zh-CN/resources/role.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GuildRole {
     /// 角色 ID
@@ -229,7 +225,6 @@ impl GuildRole {
 // ----------------------------------------------------------------------------
 
 /// 消息对象
-/// 参考: zh-CN/resources/message.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Message {
     /// 消息 ID
@@ -294,7 +289,6 @@ impl Message {
 // ----------------------------------------------------------------------------
 
 /// 登录状态
-/// 参考: zh-CN/resources/login.md
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[repr(i32)]
 pub enum LoginStatus {
@@ -329,7 +323,6 @@ impl LoginStatus {
 }
 
 /// 登录信息对象
-/// 参考: zh-CN/resources/login.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Login {
     /// 序列号（仅用于标识）
@@ -379,7 +372,6 @@ impl Login {
 // ----------------------------------------------------------------------------
 
 /// 交互指令
-/// 参考: zh-CN/resources/interaction.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Argv {
     /// 指令名称
@@ -393,7 +385,6 @@ pub struct Argv {
 }
 
 /// 交互按钮
-/// 参考: zh-CN/resources/interaction.md
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Button {
     /// 按钮 ID
@@ -405,7 +396,6 @@ pub struct Button {
 // ----------------------------------------------------------------------------
 
 /// 分页列表
-/// 参考: zh-CN/protocol/api.md
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PagedList<T> {
     /// 数据列表
@@ -433,7 +423,6 @@ impl<T> PagedList<T> {
 }
 
 /// 双向分页列表
-/// 参考: zh-CN/protocol/api.md
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BidiPagedList<T> {
     /// 数据列表
@@ -456,6 +445,8 @@ pub mod event_types {
     pub const MESSAGE_CREATED: &str = "message-created";
     pub const MESSAGE_UPDATED: &str = "message-updated";
     pub const MESSAGE_DELETED: &str = "message-deleted";
+    // 发送前预处理事件
+    pub const BEFORE_SEND: &str = "before-send";
 
     // 群组事件
     pub const GUILD_ADDED: &str = "guild-added";
@@ -495,7 +486,6 @@ pub mod event_types {
 }
 
 /// 核心事件结构
-/// 参考: zh-CN/protocol/events.md
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     /// 事件序列号
@@ -610,6 +600,16 @@ impl Event {
     /// 创建消息删除事件
     pub fn message_deleted(message: Message) -> Self {
         Self::build_message_event(event_types::MESSAGE_DELETED, message)
+    }
+
+    /// 创建发送前预处理事件 (Before Send)
+    pub fn before_send(message: Message, adapter_id: impl Into<String>) -> Self {
+        let mut event = Self::build_message_event(event_types::BEFORE_SEND, message);
+        event.login = Some(Login {
+            adapter: Some(adapter_id.into()),
+            ..Default::default()
+        });
+        event
     }
 
     // ========================================================================
@@ -844,6 +844,8 @@ impl Event {
         self
     }
 
+    // --- 事件类型判定 ---
+
     /// 是否为消息事件
     pub fn is_message_event(&self) -> bool {
         self.event_type.starts_with("message-")
@@ -854,27 +856,14 @@ impl Event {
         self.event_type.starts_with("guild-")
     }
 
-    /// 获取消息内容（如果是消息事件）
-    pub fn content(&self) -> Option<&str> {
-        self.message.as_ref().map(|m| m.content.as_str())
+    /// 是否为元事件 (Lifecycle/Heartbeat)
+    pub fn is_meta_event(&self) -> bool {
+        self.event_type.starts_with("login-") || self.event_type == event_types::INTERNAL
     }
 
-    /// 获取发送者 ID
-    pub fn sender_id(&self) -> Option<&str> {
-        self.user.as_ref().map(|u| u.id.as_str())
-    }
+    // --- 平台与登录账号信息 (Login/Self) ---
 
-    /// 获取频道 ID
-    pub fn channel_id(&self) -> Option<&str> {
-        self.channel.as_ref().map(|c| c.id.as_str())
-    }
-
-    /// 获取群组 ID
-    pub fn guild_id(&self) -> Option<&str> {
-        self.guild.as_ref().map(|g| g.id.as_str())
-    }
-
-    /// 获取平台名称
+    /// 获取平台名称 (e.g., "qq", "discord", "telegram")
     pub fn platform(&self) -> Option<&str> {
         self.login.as_ref().and_then(|l| l.platform.as_deref())
     }
@@ -882,6 +871,172 @@ impl Event {
     /// 获取适配器名称
     pub fn adapter(&self) -> Option<&str> {
         self.login.as_ref().and_then(|l| l.adapter.as_deref())
+    }
+
+    /// 获取当前登录机器人的 ID
+    pub fn bot_id(&self) -> Option<&str> {
+        self.login
+            .as_ref()
+            .and_then(|l| l.user.as_ref())
+            .map(|u| u.id.as_str())
+    }
+
+    /// 获取当前登录机器人的名称
+    pub fn bot_name(&self) -> Option<&str> {
+        self.login.as_ref().and_then(|l| {
+            l.user
+                .as_ref()
+                .and_then(|u| u.name.as_deref().or(u.nick.as_deref()))
+        })
+    }
+
+    // --- 消息信息 (Message) ---
+
+    /// 获取消息 ID
+    pub fn message_id(&self) -> Option<&str> {
+        self.message.as_ref().map(|m| m.id.as_str())
+    }
+
+    /// 获取消息内容
+    pub fn content(&self) -> Option<&str> {
+        self.message.as_ref().map(|m| m.content.as_str())
+    }
+
+    /// 获取消息发送时间戳
+    pub fn message_timestamp(&self) -> Option<i64> {
+        self.message.as_ref().and_then(|m| m.created_at)
+    }
+
+    // --- 发送者/用户 (User) ---
+
+    /// 获取事件触发者的 ID (User ID)
+    /// 通常是消息发送者、被操作的对象等
+    pub fn user_id(&self) -> Option<&str> {
+        self.user.as_ref().map(|u| u.id.as_str())
+    }
+
+    /// user_id 的别名，语意更明确用于消息事件
+    pub fn sender_id(&self) -> Option<&str> {
+        self.user_id()
+    }
+
+    /// 获取用户的名称 (User Name)
+    /// 注意：这通常是账号名，不一定是昵称
+    pub fn user_name(&self) -> Option<&str> {
+        self.user.as_ref().and_then(|u| u.name.as_deref())
+    }
+
+    /// 获取用户的昵称 (User Nick)
+    /// 这是用户设置的全局昵称
+    pub fn user_nick(&self) -> Option<&str> {
+        self.user.as_ref().and_then(|u| u.nick.as_deref())
+    }
+
+    /// 获取用户的头像链接
+    pub fn user_avatar(&self) -> Option<&str> {
+        self.user.as_ref().and_then(|u| u.avatar.as_deref())
+    }
+
+    /// 判断触发者是否为机器人
+    pub fn is_bot(&self) -> bool {
+        self.user.as_ref().and_then(|u| u.is_bot).unwrap_or(false)
+    }
+
+    // --- 群组/公会 (Guild) ---
+
+    /// 获取群组 ID
+    pub fn guild_id(&self) -> Option<&str> {
+        self.guild.as_ref().map(|g| g.id.as_str())
+    }
+
+    /// 获取群组名称
+    pub fn guild_name(&self) -> Option<&str> {
+        self.guild.as_ref().and_then(|g| g.name.as_deref())
+    }
+
+    /// 获取群组头像
+    pub fn guild_avatar(&self) -> Option<&str> {
+        self.guild.as_ref().and_then(|g| g.avatar.as_deref())
+    }
+
+    // --- 频道 (Channel) ---
+
+    /// 获取频道 ID
+    pub fn channel_id(&self) -> Option<&str> {
+        self.channel.as_ref().map(|c| c.id.as_str())
+    }
+
+    /// 获取频道名称
+    pub fn channel_name(&self) -> Option<&str> {
+        self.channel.as_ref().and_then(|c| c.name.as_deref())
+    }
+
+    /// 获取频道类型
+    pub fn channel_type(&self) -> Option<ChannelType> {
+        self.channel.as_ref().map(|c| c.channel_type)
+    }
+
+    /// 判断是否为私聊消息/频道
+    pub fn is_direct(&self) -> bool {
+        self.channel
+            .as_ref()
+            .map(|c| c.is_direct())
+            .unwrap_or(false)
+    }
+
+    // --- 群成员 (Member) ---
+
+    /// 获取成员在群内的昵称
+    pub fn member_nick(&self) -> Option<&str> {
+        self.member.as_ref().and_then(|m| m.nick.as_deref())
+    }
+
+    /// 获取成员在群内的头像
+    /// 如果成员没有特定头像，通常回退到 User 头像，这里只返回 Member 结构体中的数据
+    pub fn member_avatar(&self) -> Option<&str> {
+        self.member.as_ref().and_then(|m| m.avatar.as_deref())
+    }
+
+    // --- 智能获取 (Smart Getters) ---
+
+    /// 获取发送者的最佳显示名称
+    /// 优先级: 群名片(Member Nick) > 用户昵称(User Nick) > 用户名(User Name) > 用户ID
+    pub fn sender_name(&self) -> &str {
+        // 1. 尝试群成员昵称
+        if let Some(nick) = self.member_nick() {
+            return nick;
+        }
+        // 2. 尝试用户昵称/名称/ID
+        if let Some(user) = &self.user {
+            return user.display_name();
+        }
+        // 3. Fallback
+        "Unknown"
+    }
+
+    // --- 操作者 (Operator) ---
+    // 用于群员变动等事件，指代表执行操作的管理员
+
+    /// 获取操作者 ID
+    pub fn operator_id(&self) -> Option<&str> {
+        self.operator.as_ref().map(|u| u.id.as_str())
+    }
+
+    /// 获取操作者名称
+    pub fn operator_name(&self) -> Option<&str> {
+        self.operator.as_ref().and_then(|u| u.name.as_deref())
+    }
+
+    // --- 角色 (Role) ---
+
+    /// 获取涉及的角色 ID
+    pub fn role_id(&self) -> Option<&str> {
+        self.role.as_ref().map(|r| r.id.as_str())
+    }
+
+    /// 获取涉及的角色名称
+    pub fn role_name(&self) -> Option<&str> {
+        self.role.as_ref().and_then(|r| r.name.as_deref())
     }
 }
 
@@ -1286,7 +1441,7 @@ pub mod message_elements {
                         write!(f, " id=\"{}\"", escape_attr(v))?;
                     }
                     if *forward {
-                        // 修改：显式输出属性值，兼容严格 XML 解析
+                        // 显式输出属性值，兼容严格 XML 解析
                         write!(f, " forward=\"true\"")?;
                     }
                     if children.is_empty() {
@@ -1388,12 +1543,8 @@ pub mod message_elements {
     /// 解析消息内容为元素列表
     /// 使用 quick-xml 进行完整解析
     pub fn parse(content: &str) -> Vec<Element> {
-        // [修复] 预处理 Satori 消息中的布尔属性 (如 <message forward ...>)
-        // XML 解析器通常要求 key="value"，遇到纯布尔属性可能丢弃或报错。
-        // 这里进行简单替换以兼容 NapCat/OneBot 等发送的非严格 XML。
         let fixed_content = content.replace("<message forward ", "<message forward=\"true\" ");
 
-        // 为了处理 XML 片段（可能没有根节点），我们将其包裹在一个伪根节点中
         let wrapped_content = format!("<root>{}</root>", fixed_content);
         let mut reader = Reader::from_str(&wrapped_content);
         reader.config_mut().trim_text(false); // 保留空格
@@ -1418,7 +1569,6 @@ pub mod message_elements {
                         // 弹出当前栈顶
                         let (tag, attrs, children) = stack.pop().unwrap();
 
-                        // *** 关键修复 ***
                         // 如果当前标签是 "root" 且它是我们手动添加的最外层包裹（此时栈中只剩下一个占位符节点），
                         // 我们不将其构建为 Unknown 元素，而是直接将其子元素提取出来并合并到文档根中。
                         if tag == "root" && stack.len() == 1 {
@@ -1460,8 +1610,6 @@ pub mod message_elements {
                 }
                 Ok(XmlEvent::Eof) => break,
                 Err(_) => {
-                    // 解析错误处理：如果是简单的文本错误，作为文本处理，否则忽略或中断
-                    // 这里简化处理：遇到严重错误停止解析，返回已解析部分
                     break;
                 }
                 _ => {} // 忽略 Comment, Decl 等
@@ -1479,13 +1627,8 @@ pub mod message_elements {
     /// 将 quick-xml 的属性转换为 HashMap
     fn parse_attributes(e: &BytesStart) -> HashMap<String, String> {
         let mut attrs = HashMap::new();
-        // [修复] 使用 unescape_value 时增加容错
-        // flatten() 会吞掉错误，但对于布尔属性，我们需要确保尽量解析。
-        // 不过由于 parse() 中已经做了字符串替换预处理，这里主要作为兜底。
         for attr in e.attributes().flatten() {
             let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-            // 尝试解析值，如果 unescape 失败（极少情况），则存入空字符串以保留键
-            // 这样 build_element 中的 contains_key 检查仍然有效
             match attr.unescape_value() {
                 Ok(val) => {
                     attrs.insert(key, val.to_string());
@@ -1558,7 +1701,6 @@ pub mod message_elements {
             "p" => Element::Paragraph(children),
             "message" => Element::Message {
                 id: attrs.remove("id"),
-                // 检查 forward 是否存在且不为 "false"
                 forward: attrs.contains_key("forward"),
                 children,
             },
@@ -1594,82 +1736,87 @@ pub mod message_elements {
         let mut result = String::new();
         for elem in elements {
             match elem {
-                Element::Text(text) => result.push_str(text),
-                Element::At {
-                    name, id, at_type, ..
-                } => {
-                    result.push('@');
-                    if let Some(t) = at_type {
-                        if t == "all" {
-                            result.push_str("全体成员");
-                        } else if t == "here" {
-                            result.push_str("在线成员");
+                    Element::Text(text) => result.push_str(text),
+                    Element::At {
+                        name, id, at_type, ..
+                    } => {
+                        result.push('@');
+                        if let Some(t) = at_type {
+                            if t == "all" {
+                                result.push_str("全体成员");
+                            } else if t == "here" {
+                                result.push_str("在线成员");
+                            } else {
+                                result.push_str(name.as_deref().or(id.as_deref()).unwrap_or("unknown"));
+                            }
                         } else {
-                            result.push_str(name.as_deref().or(id.as_deref()).unwrap_or("unknown"));
+                            result.push_str(name.as_deref().or(id.as_deref()).unwrap_or("someone"));
                         }
-                    } else {
-                        result.push_str(name.as_deref().or(id.as_deref()).unwrap_or("someone"));
                     }
-                }
-                Element::Sharp { name, id } => {
-                    result.push('#');
-                    result.push_str(name.as_deref().unwrap_or(id));
-                }
-                Element::Link { children, href } => {
-                    let text = to_plain_text(children);
-                    if text.is_empty() {
-                        result.push_str(href);
-                    } else {
-                        result.push_str(&text);
+                    Element::Sharp { name, id } => {
+                        result.push('#');
+                        result.push_str(name.as_deref().unwrap_or(id));
                     }
-                }
-                Element::Image { title, .. } => {
-                    result.push_str(title.as_deref().unwrap_or("[图片]"));
-                }
-                Element::Audio { .. } => result.push_str("[语音]"),
-                Element::Video { .. } => result.push_str("[视频]"),
-                Element::File { title, .. } => {
-                    result.push_str(title.as_deref().unwrap_or("[文件]"));
-                }
-                Element::Button { children, .. } => {
-                    result.push('[');
-                    result.push_str(&to_plain_text(children));
-                    result.push(']');
-                }
-                Element::Break => result.push('\n'),
-                Element::Paragraph(children) => {
-                    result.push_str(&to_plain_text(children));
-                    result.push('\n');
-                }
-                // 容器类元素，递归提取
-                Element::Bold(c)
-                | Element::Italic(c)
-                | Element::Underline(c)
-                | Element::Strikethrough(c)
-                | Element::Spoiler(c)
-                | Element::Superscript(c)
-                | Element::Subscript(c)
-                | Element::Quote { children: c, .. }
-                | Element::Author { children: c, .. }
-                | Element::Unknown { children: c, .. } => {
-                    result.push_str(&to_plain_text(c));
-                }
-                Element::Message {
-                    forward,
-                    children: c,
-                    ..
-                } => {
-                    // 如果是转发引用且没有子节点（例如 <message forward id="..."/>），显示占位符
-                    if *forward && c.is_empty() {
-                        result.push_str("[合并转发]");
+                    Element::Link { children, href } => {
+                        let text = to_plain_text(children);
+                        if text.is_empty() {
+                            result.push_str(href);
+                        } else {
+                            result.push_str(&text);
+                        }
                     }
-                    // 递归处理内容
-                    result.push_str(&to_plain_text(c));
-                    // 消息节点通常意味着换行
-                    result.push('\n');
+                    Element::Image { title, .. } => {
+                        result.push_str(title.as_deref().unwrap_or("[图片]"));
+                    }
+                    Element::Audio { .. } => result.push_str("[语音]"),
+                    Element::Video { .. } => result.push_str("[视频]"),
+                    Element::File { title, .. } => {
+                        result.push_str(title.as_deref().unwrap_or("[文件]"));
+                    }
+                    Element::Button { children, .. } => {
+                        result.push('[');
+                        result.push_str(&to_plain_text(children));
+                        result.push(']');
+                    }
+                    // 单独处理 Quote，确保即使没有 children 也能显示标记
+                    Element::Quote { children, .. } => {
+                        result.push_str("[回复]");
+                        result.push_str(&to_plain_text(children));
+                    }
+                    Element::Break => result.push('\n'),
+                    Element::Paragraph(children) => {
+                        result.push_str(&to_plain_text(children));
+                        result.push('\n');
+                    }
+                    // 容器类元素，递归提取
+                    Element::Bold(c)
+                    | Element::Italic(c)
+                    | Element::Underline(c)
+                    | Element::Strikethrough(c)
+                    | Element::Spoiler(c)
+                    | Element::Superscript(c)
+                    | Element::Subscript(c)
+                    // Element::Quote 已移至上方单独处理
+                    | Element::Author { children: c, .. }
+                    | Element::Unknown { children: c, .. } => {
+                        result.push_str(&to_plain_text(c));
+                    }
+                    Element::Message {
+                        forward,
+                        children: c,
+                        ..
+                    } => {
+                        // 如果是转发引用且没有子节点（例如 <message forward id="..."/>），显示占位符
+                        if *forward && c.is_empty() {
+                            result.push_str("[合并转发]");
+                        }
+                        // 递归处理内容
+                        result.push_str(&to_plain_text(c));
+                        // 消息节点通常意味着换行
+                        result.push('\n');
+                    }
+                    Element::Code(text) => result.push_str(text),
                 }
-                Element::Code(text) => result.push_str(text),
-            }
         }
         result
     }
@@ -1888,7 +2035,6 @@ pub mod message_elements {
         }
 
         pub fn forward_id(mut self, message_id: impl AsRef<str>) -> Self {
-            // 使用 forward="true"
             self.content.push_str(&format!(
                 r#"<message id="{}" forward="true"/>"#,
                 escape_attr(message_id.as_ref())
@@ -1902,7 +2048,6 @@ pub mod message_elements {
         }
 
         pub fn merge_forward_nodes(mut self, nodes: &[ForwardNode]) -> Self {
-            // 使用 forward="true"
             self.content.push_str("<message forward=\"true\">");
             for node in nodes {
                 self.content.push_str(&node.to_xml());
@@ -1913,7 +2058,6 @@ pub mod message_elements {
 
         pub fn wrap_forward(mut self) -> Self {
             let inner = std::mem::take(&mut self.content);
-            // 使用 forward="true"
             self.content.push_str("<message forward=\"true\">");
             self.content.push_str(&inner);
             self.content.push_str("</message>");
@@ -1921,7 +2065,6 @@ pub mod message_elements {
         }
 
         pub fn merge_forward(mut self, content: impl AsRef<str>) -> Self {
-            // 使用 forward="true"
             self.content.push_str("<message forward=\"true\">");
             self.content.push_str(content.as_ref());
             self.content.push_str("</message>");
@@ -1933,7 +2076,6 @@ pub mod message_elements {
         }
     }
 
-    // 允许 MessageBuilder 直接转为 String，方便 Into<String> 参数的使用
     impl From<MessageBuilder> for String {
         fn from(builder: MessageBuilder) -> Self {
             builder.build()
@@ -1963,43 +2105,101 @@ pub mod message_elements {
 
 /// 指令解析工具库
 pub mod command {
-    use super::message_elements::Element;
+    use super::message_elements::{self, Element};
 
-    /// 尝试匹配并剥离前缀
+    /// 解析后的指令结果
+    #[derive(Debug, Clone)]
+    pub struct ParsedCommand {
+        /// 指令名称 (不含前缀)
+        pub name: String,
+        /// 原始参数部分字符串 (去除了指令和前导空格)
+        pub args_raw: String,
+        /// 纯文本参数 (提取了所有 args_elements 中的纯文本并合并)
+        pub args_text: String,
+        /// 参数部分的元素列表 (包含文本、图片等)
+        pub args_elements: Vec<Element>,
+    }
+
+    /// 智能解析指令
     ///
-    /// 遍历 `prefixes` 列表，如果 `content` 以其中任意一个开头，则返回匹配到的前缀。
-    /// 开发者可以使用此函数判断消息是否为指令。
-    pub fn match_prefix(content: &str, prefixes: &[String]) -> Option<String> {
-        let trimmed = content.trim_start();
-        for prefix in prefixes {
-            if trimmed.starts_with(prefix) {
-                return Some(prefix.clone());
+    /// # 逻辑步骤
+    /// 1. 解析 XML 消息内容。
+    /// 2. 跳过消息头部的干扰项（引用回复、@别人、@机器人、空白字符）。
+    /// 3. 寻找第一个文本节点。
+    /// 4. 尝试匹配 `prefixes` + `command_name`。
+    /// 5. 如果匹配，提取剩余部分作为参数。
+    pub fn parse(content: &str, prefixes: &[String], command_name: &str) -> Option<ParsedCommand> {
+        let elements = message_elements::parse(content);
+
+        // 智能定位指令起始位置
+        let mut start_index = 0;
+        let mut found_valid_node = false;
+
+        for (i, elem) in elements.iter().enumerate() {
+            match elem {
+                // 1. 忽略 引用回复 和 艾特
+                Element::Quote { .. } | Element::At { .. } => continue,
+
+                // 2. 忽略 At 之间的纯空白文本节点
+                Element::Text(t) if t.trim().is_empty() => continue,
+
+                // 3. 找到第一个既不是At/Quote，也不是纯空格的节点
+                _ => {
+                    start_index = i;
+                    found_valid_node = true;
+                    break;
+                }
             }
         }
+
+        if !found_valid_node {
+            return None;
+        }
+
+        let valid_elements = &elements[start_index..];
+
+        // 检查第一个有效节点是否为文本且包含指令
+        if let Some(Element::Text(text)) = valid_elements.first() {
+            let trimmed_text = text.trim_start();
+
+            // 遍历所有配置的前缀进行匹配
+            for prefix in prefixes {
+                // 动态构造触发词，不区分大小写可在此处优化
+                let trigger = format!("{}{}", prefix, command_name);
+
+                if let Some(args_part) = trimmed_text.strip_prefix(&trigger) {
+                    let mut final_elements = Vec::new();
+
+                    // (A) 处理指令所在的文本节点，保留指令后的参数
+                    let clean_args_head = args_part.trim_start();
+                    if !clean_args_head.is_empty() {
+                        final_elements.push(Element::Text(clean_args_head.to_string()));
+                    }
+
+                    // (B) 追加后续的所有节点 (图片、表情等)
+                    if valid_elements.len() > 1 {
+                        final_elements.extend_from_slice(&valid_elements[1..]);
+                    }
+
+                    // 生成辅助字段
+                    let args_text = message_elements::to_plain_text(&final_elements);
+                    // 简单的 raw 生成：将元素转回 string 拼接
+                    let args_raw = final_elements
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<String>();
+
+                    return Some(ParsedCommand {
+                        name: command_name.to_string(),
+                        args_raw,
+                        args_text,
+                        args_elements: final_elements,
+                    });
+                }
+            }
+        }
+
         None
-    }
-
-    /// 工具：跳过消息开头的引用(Quote)元素
-    ///
-    /// 在处理回复消息时，通常需要忽略引用的部分，只解析用户新输入的内容。
-    /// 返回跳过引用后的元素切片。
-    pub fn skip_quote_elements(elements: &[Element]) -> &[Element] {
-        let mut start = 0;
-        while start < elements.len() {
-            if matches!(elements[start], Element::Quote { .. }) {
-                start += 1;
-            } else {
-                break;
-            }
-        }
-        &elements[start..]
-    }
-
-    /// 工具：查找第一个纯文本元素的内容
-    ///
-    /// 常用于获取指令主体。例如从 `[Quote] /echo hello` 中提取 `/echo hello`。
-    pub fn find_first_text(elements: &[Element]) -> Option<&str> {
-        elements.iter().find_map(|e| e.as_text())
     }
 }
 
@@ -2689,6 +2889,7 @@ struct PluginContextInner {
     adapters: Arc<RwLock<HashMap<String, Arc<dyn Adapter>>>>,
     // 引用 AyjxInner 中的插件列表，用于管理插件状态
     plugins: Arc<RwLock<Vec<PluginSlot>>>,
+    middlewares: Arc<Vec<Box<dyn Middleware>>>,
     session_manager: Arc<SessionManager>,
     system_tx: broadcast::Sender<SystemSignal>,
     running: Arc<AtomicBool>,
@@ -2702,6 +2903,7 @@ impl PluginContext {
         config: Arc<ConfigManager>,
         adapters: Arc<RwLock<HashMap<String, Arc<dyn Adapter>>>>,
         plugins: Arc<RwLock<Vec<PluginSlot>>>,
+        middlewares: Arc<Vec<Box<dyn Middleware>>>,
         session_manager: Arc<SessionManager>,
         system_tx: broadcast::Sender<SystemSignal>,
         running: Arc<AtomicBool>,
@@ -2712,6 +2914,7 @@ impl PluginContext {
                 config,
                 adapters,
                 plugins,
+                middlewares,
                 session_manager,
                 system_tx,
                 running,
@@ -2731,6 +2934,24 @@ impl PluginContext {
         self.config().await.get_plugin_config(&self.inner.plugin_id)
     }
 
+    /// 保存并更新当前插件的配置
+    pub async fn save_plugin_config<T: Serialize>(&self, config: T) -> AyjxResult<()> {
+        let plugin_id = self.inner.plugin_id.clone();
+
+        let value = toml::Value::try_from(config)?;
+
+        self.inner
+            .config
+            .update(move |app_cfg| {
+                app_cfg.plugins.insert(plugin_id, value);
+            })
+            .await?;
+
+        self.request_config_reload();
+
+        Ok(())
+    }
+
     /// 获取当前插件的数据目录
     pub fn data_dir(&self) -> PathBuf {
         self.inner.data_base_dir.join(&self.inner.plugin_id)
@@ -2743,16 +2964,129 @@ impl PluginContext {
         Ok(dir)
     }
 
-    /// 发送消息（便捷方法）
+    /// 快捷方法：解析指令
+    ///
+    /// 自动检查事件类型是否为消息，获取全局配置的前缀，并尝试匹配指定指令名。
+    /// 如果匹配成功，返回包含参数信息的结构体。
+    pub async fn parse_command(
+        &self,
+        event: &Event,
+        command_name: &str,
+    ) -> Option<command::ParsedCommand> {
+        if event.event_type != event_types::MESSAGE_CREATED {
+            return None;
+        }
+
+        let content = event.content()?;
+
+        let config = self.config().await;
+        let prefixes = &config.core.cmd_prefix;
+
+        command::parse(content, prefixes, command_name)
+    }
+
+    /// 内部方法：分发事件并获取处理结果
+    /// 返回元组 (最终事件, 是否继续执行)
+    async fn dispatch_event(&self, mut event: Event) -> AyjxResult<(Event, bool)> {
+        // 1. Session 拦截 (Wait 机制)
+        if self.inner.session_manager.check(&event).await {
+            return Ok((event, false));
+        }
+
+        // 2. 执行中间件链
+        let middleware_ctx = MiddlewareContext {
+            config: self.inner.config.clone(),
+        };
+
+        for middleware in self.inner.middlewares.iter() {
+            match middleware.process(&middleware_ctx, event.clone()).await? {
+                MiddlewareResult::Continue(e) => {
+                    event = e;
+                }
+                MiddlewareResult::Stop => {
+                    return Ok((event, false));
+                }
+                MiddlewareResult::Modified(e) => {
+                    event = e;
+                }
+            }
+        }
+
+        // 3. 分发给插件
+        let slots: Vec<PluginSlot> = {
+            let guard = self.inner.plugins.read().await;
+            guard.clone()
+        };
+
+        for slot in slots {
+            if !slot.enabled.load(Ordering::SeqCst) {
+                continue;
+            }
+
+            let ctx = PluginContext::new(
+                slot.plugin.id().to_string(),
+                self.inner.config.clone(),
+                self.inner.adapters.clone(),
+                self.inner.plugins.clone(),
+                self.inner.middlewares.clone(),
+                self.inner.session_manager.clone(),
+                self.inner.system_tx.clone(),
+                self.inner.running.clone(),
+                self.inner.data_base_dir.clone(),
+            );
+
+            match slot.plugin.on_event(&ctx, &event).await {
+                Ok(EventResult::Stop) => return Ok((event, false)),
+                Ok(EventResult::Continue) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "[Ayjx] 插件 {} 处理内部事件 {} 时发生错误: {}",
+                        slot.plugin.name(),
+                        event.event_type,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok((event, true))
+    }
+
+    /// 发送消息
     pub async fn send_message(
         &self,
         adapter_id: &str,
         channel_id: &str,
         content: &str,
     ) -> AyjxResult<Vec<Message>> {
+        // 1. 构建预处理事件
+        let mut message = Message::new("", content);
+        message.channel = Some(Channel::new(channel_id, ChannelType::Text));
+
+        // 尝试从缓存获取 adapter 信息以填充事件（可选优化）
+
+        let event = Event::before_send(message, adapter_id);
+
+        // 2. 触发系统事件流程 (Session -> Middleware -> Plugins)
+        // 中间件可以修改 content，插件可以返回 Stop 来拦截发送
+        let (processed_event, should_send) = self.dispatch_event(event).await?;
+
+        if !should_send {
+            // 被拦截
+            return Ok(Vec::new());
+        }
+
+        // 3. 获取最终内容 (可能被中间件修改)
+        let final_content = processed_event
+            .message
+            .as_ref()
+            .map(|m| m.content.as_str())
+            .unwrap_or(content);
+
+        // 4. 执行实际发送
         let adapters = self.inner.adapters.read().await;
         if let Some(adapter) = adapters.get(adapter_id) {
-            adapter.send_message(channel_id, content).await
+            adapter.send_message(channel_id, final_content).await
         } else {
             Err(format!("Adapter {} not found", adapter_id).into())
         }
@@ -2768,25 +3102,6 @@ impl PluginContext {
             .ok_or_else(|| "Event has no channel info".to_string())?;
 
         self.send_message(adapter_id, channel_id, content).await
-    }
-
-    /// 上下文智能发送
-    /// 自动从 event 中提取适配器和频道信息，发送消息到当前场景
-    /// 支持 String, &str, MessageBuilder 等实现了 Into<String> 的类型
-    pub async fn send_current(
-        &self,
-        event: &Event,
-        content: impl Into<String>,
-    ) -> AyjxResult<Vec<Message>> {
-        let adapter_id = event
-            .adapter()
-            .ok_or_else(|| "Event has no adapter info".to_string())?;
-        let channel_id = event
-            .channel_id()
-            .ok_or_else(|| "Event has no channel info".to_string())?;
-
-        self.send_message(adapter_id, channel_id, &content.into())
-            .await
     }
 
     /// 等待下一条符合条件的消息
@@ -2889,15 +3204,12 @@ impl PluginContext {
         let _ = self.inner.system_tx.send(SystemSignal::ConfigReload);
     }
 
-    // 修改 enable_plugin
     pub async fn enable_plugin(&self, plugin_id: &str) -> bool {
-        // 这里只需要读锁，因为我们要修改的是 Arc 内部的 AtomicBool，而不是 Vec 结构本身
         let plugins = self.inner.plugins.read().await;
 
         if let Some(slot) = plugins.iter().find(|p| p.plugin.id() == plugin_id) {
             // 检查当前状态 (load)
             if !slot.enabled.load(Ordering::SeqCst) {
-                // 修改状态 (store)
                 slot.enabled.store(true, Ordering::SeqCst);
                 println!("[Ayjx] 插件 {} 已启用", slot.plugin.name());
                 return true;
@@ -2906,14 +3218,12 @@ impl PluginContext {
         false
     }
 
-    // 修改 disable_plugin
     pub async fn disable_plugin(&self, plugin_id: &str) -> bool {
         let plugins = self.inner.plugins.read().await;
 
         if let Some(slot) = plugins.iter().find(|p| p.plugin.id() == plugin_id) {
             // 检查当前状态
             if slot.enabled.load(Ordering::SeqCst) {
-                // 修改状态
                 slot.enabled.store(false, Ordering::SeqCst);
                 println!("[Ayjx] 插件 {} 已禁用", slot.plugin.name());
                 return true;
@@ -3004,7 +3314,7 @@ struct PluginSlot {
 struct AyjxInner {
     config: Arc<ConfigManager>,
     adapters: Arc<RwLock<HashMap<String, Arc<dyn Adapter>>>>,
-    // 修改：使用 RwLock 和 PluginSlot 支持运行时状态管理
+    // 使用 RwLock 和 PluginSlot 支持运行时状态管理
     plugins: Arc<RwLock<Vec<PluginSlot>>>,
     middlewares: Arc<Vec<Box<dyn Middleware>>>,
     session_manager: Arc<SessionManager>,
@@ -3156,8 +3466,7 @@ impl Ayjx {
         self.inner.running.store(true, Ordering::SeqCst);
 
         // 1. 加载配置
-        println!("[Ayjx] 正在加载配置...");
-        // 这里我们需要先加载一次，获取当前磁盘上的状态
+        println!("[Ayjx] 配置文件: {}", self.inner.config.path.display());
         let mut initial_config = self.inner.config.load().await?;
         let mut config_modified = false;
 
@@ -3196,7 +3505,7 @@ impl Ayjx {
 
         // 如果配置有更新，原子落盘
         if config_modified {
-            println!("[Ayjx] 检测到新组件，正在更新配置文件...");
+            println!("[Ayjx] 正在更新配置文件...");
             self.inner.config.save_atomic(&initial_config).await?;
         }
 
@@ -3261,7 +3570,6 @@ impl Ayjx {
 
         loop {
             tokio::select! {
-                // 处理系统信号
                 Ok(signal) = system_rx.recv() => {
                     match signal {
                         SystemSignal::Shutdown => {
@@ -3290,7 +3598,7 @@ impl Ayjx {
                     }
                 }
 
-                // 处理事件 (关键优化：使用 tokio::spawn 实现并行处理)
+                // 处理事件
                 Some(event) = event_rx.recv() => {
                     let inner = self.inner.clone();
                     tokio::spawn(async move {
@@ -3314,7 +3622,6 @@ impl Ayjx {
 
         if restart_requested {
             println!("[Ayjx] 框架已停止，请由外部进程进行重启操作。");
-            // 这里返回 Ok，外部程序（如 main 函数中的 loop）可以根据需要重新调用 run 或退出
         } else {
             println!("[Ayjx] 框架已停止");
         }
@@ -3394,17 +3701,15 @@ impl AyjxInner {
         let slots: Vec<PluginSlot> = {
             let guard = self.plugins.read().await;
             guard.clone()
-        }; // 读锁在这里释放，防止死锁
+        };
 
         for slot in slots {
-            // 使用 load 检查状态
             if !slot.enabled.load(Ordering::SeqCst) {
                 continue;
             }
 
             let ctx = self.create_plugin_context(slot.plugin.id());
 
-            // 现在调用 await 是安全的
             match slot.plugin.on_event(&ctx, &event).await {
                 Ok(EventResult::Stop) => break,
                 Ok(EventResult::Continue) => continue,
@@ -3427,6 +3732,7 @@ impl AyjxInner {
             self.config.clone(),
             self.adapters.clone(),
             self.plugins.clone(),
+            self.middlewares.clone(),
             self.session_manager.clone(),
             self.system_tx.clone(),
             self.running.clone(),
