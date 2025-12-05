@@ -81,6 +81,32 @@ where
     Ok(data)
 }
 
+/// 不等待响应的 API 调用函数 (Fire-and-forget)
+/// 用于 send_like, delete_msg 等无需返回值的操作，提高并发性能
+pub async fn call_action_no_wait<P>(
+    _ctx: &Context,
+    writer: LockedWriter,
+    action: &str,
+    params: P,
+) -> Result<(), ApiError>
+where
+    P: Serialize,
+{
+    let echo = next_echo();
+    let req = ApiRequest {
+        action: action.to_string(),
+        params,
+        echo,
+    };
+
+    let json_str = simd_json::to_string(&req)?;
+
+    // 直接发送请求，不等待 WS 返回
+    send_frame_raw(writer, json_str).await?;
+
+    Ok(())
+}
+
 // ================= API 定义 =================
 
 // --- delete_msg ---
@@ -95,7 +121,7 @@ pub async fn delete_msg(
     writer: LockedWriter,
     message_id: i32,
 ) -> Result<(), ApiError> {
-    call_action(ctx, writer, "delete_msg", DeleteMsgParams { message_id }).await
+    call_action_no_wait(ctx, writer, "delete_msg", DeleteMsgParams { message_id }).await
 }
 
 // --- get_msg ---
@@ -165,7 +191,7 @@ pub async fn send_like(
     user_id: i64,
     times: i32,
 ) -> Result<(), ApiError> {
-    call_action(ctx, writer, "send_like", SendLikeParams { user_id, times }).await
+    call_action_no_wait(ctx, writer, "send_like", SendLikeParams { user_id, times }).await
 }
 
 #[derive(Serialize)]
@@ -190,7 +216,7 @@ pub async fn set_group_special_title(
         special_title,
         duration,
     };
-    call_action(ctx, writer, "set_group_special_title", params).await
+    call_action_no_wait(ctx, writer, "set_group_special_title", params).await
 }
 
 // --- get_group_member_info ---

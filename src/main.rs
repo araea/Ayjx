@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 等待退出信号 (优雅关闭)
     match signal::ctrl_c().await {
         Ok(()) => {
-            info!("\n收到退出信号，正在清理资源...");
+            info!("收到退出信号，正在清理资源...");
         }
         Err(err) => {
             error!("监听信号失败: {}", err);

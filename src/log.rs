@@ -26,7 +26,7 @@ pub fn print(level: Level, target: &str, args: std::fmt::Arguments) {
     };
 
     println!(
-        "{}[{}] {}[{}] {} {}{:<12}{} {}",
+        "{}[{}] {}[{}] {} {}{}{} {}",
         gray,
         now,
         color,
