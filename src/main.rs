@@ -1,39 +1,129 @@
-mod adapter_console;
-mod adapter_napcat;
+mod bot;
+mod config;
+mod db;
+mod event;
+mod message;
+mod plugins;
+mod scheduler;
 
-mod plugin_blacklist;
-mod plugin_echo;
-mod plugin_group_self_title;
-mod plugin_logger;
-mod plugin_recall;
-mod plugin_repeater;
-
-use adapter_console::ConsoleAdapter;
-use adapter_napcat::NapCatAdapter;
-
-use plugin_blacklist::BlacklistPlugin;
-use plugin_echo::EchoPlugin;
-use plugin_group_self_title::SelfTitlePlugin;
-use plugin_logger::ConsoleLoggerPlugin;
-use plugin_recall::RecallPlugin;
-use plugin_repeater::RepeaterPlugin;
-
-use ayjx::prelude::*;
+use crate::config::AppConfig;
+use crate::event::{Context, EventType};
+use crate::scheduler::Scheduler;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use tokio::fs;
+use tokio::signal;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[tokio::main]
-async fn main() -> AyjxResult<()> {
-    let ayjx = Ayjx::builder()
-        .adapter(ConsoleAdapter::default())
-        .adapter(NapCatAdapter::new())
-        .plugin(BlacklistPlugin)
-        .plugin(ConsoleLoggerPlugin::new())
-        .plugin(EchoPlugin)
-        .plugin(RepeaterPlugin::new())
-        .plugin(SelfTitlePlugin)
-        .plugin(RecallPlugin)
-        .build();
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config_path = "config.toml";
 
-    ayjx.run().await?;
+    let db = db::init().await.expect("数据库初始化失败");
 
+    // 加载或创建基础配置
+    let mut config_content = String::new();
+    if Path::new(config_path).exists() {
+        config_content = fs::read_to_string(config_path).await?;
+    }
+
+    let mut app_config: AppConfig = toml::from_str(&config_content).unwrap_or_default();
+
+    // 动态合并插件默认配置
+    let registered_plugins = plugins::get_plugins();
+    let mut config_dirty = false;
+
+    for plugin in registered_plugins {
+        if !app_config.plugins.contains_key(plugin.name) {
+            println!("检测到新插件 [{}]，写入默认配置...", plugin.name);
+            app_config
+                .plugins
+                .insert(plugin.name.to_string(), (plugin.default_config)());
+            config_dirty = true;
+        }
+    }
+
+    if config_dirty || !Path::new(config_path).exists() {
+        app_config.save(config_path).await?;
+        if config_dirty {
+            println!("配置文件已更新。");
+        }
+    }
+
+    // 构建运行时组件
+    let shared_config = Arc::new(RwLock::new(app_config.clone()));
+    // 初始化调度器
+    let scheduler = Arc::new(Scheduler::new());
+    // 初始化文件写入锁
+    let save_lock = Arc::new(AsyncMutex::new(()));
+
+    // === 触发插件初始化钩子 (生命周期: init) ===
+    let init_ctx = Context {
+        event: EventType::Init,
+        config: shared_config.clone(),
+        config_save_lock: save_lock.clone(),
+        db: db.clone(),
+        scheduler: scheduler.clone(),
+        config_path: config_path.to_string(),
+    };
+    plugins::do_init(init_ctx).await?;
+    // ==========================================
+
+    // 启动 Bots
+    let mut active_bots = 0;
+    for bot_conf in app_config.bots {
+        if bot_conf.access_token.trim().is_empty() {
+            println!("Bot [{}] Token 为空，跳过。", bot_conf.url);
+            continue;
+        }
+
+        active_bots += 1;
+        let bot_shared_cfg = shared_config.clone();
+        let bot_scheduler = scheduler.clone();
+        let bot_save_lock = save_lock.clone();
+        let bot_config_path = config_path.to_string();
+        let bot_db = db.clone();
+
+        tokio::spawn(async move {
+            bot::run_bot_loop(
+                bot_conf,
+                bot_shared_cfg,
+                bot_db,
+                bot_scheduler,
+                bot_save_lock,
+                bot_config_path,
+            )
+            .await;
+        });
+    }
+
+    println!("激活 Bot 数量: {}。按 Ctrl+C 退出。", active_bots);
+
+    // 等待退出信号 (优雅关闭)
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            println!("\n收到退出信号，正在清理资源...");
+        }
+        Err(err) => {
+            eprintln!("监听信号失败: {}", err);
+        }
+    }
+
+    // 执行清理工作
+    // 停止所有定时任务，消除副作用
+    scheduler.shutdown();
+
+    let _ = db.close().await;
+
+    // 退出前强制再保存一次配置，确保万无一失
+    if let Ok(guard) = shared_config.read() {
+        if let Err(e) = guard.save(config_path).await {
+            eprintln!("退出前保存配置失败: {}", e);
+        } else {
+            println!("配置已保存。");
+        }
+    }
+
+    println!("再见！");
     Ok(())
 }
