@@ -101,10 +101,10 @@ impl Scheduler {
                     .and_hms_opt(hour, minute, second)
                     .and_then(|t| Local.from_local_datetime(&t).single());
 
-                if let Some(target) = target_today {
-                    if target > now {
-                        return Some(target);
-                    }
+                if let Some(target) = target_today
+                    && target > now
+                {
+                    return Some(target);
                 }
 
                 // 如果今天已经过了，或者是无效时间（如夏令时跳变），则定在明天
@@ -129,6 +129,5 @@ impl Scheduler {
         for (_, handle) in tasks.drain() {
             handle.abort();
         }
-        println!("所有定时任务已停止。");
     }
 }

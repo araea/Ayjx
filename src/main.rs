@@ -7,7 +7,7 @@ mod plugins;
 mod scheduler;
 
 use crate::config::AppConfig;
-use crate::event::{Context, EventType};
+use crate::event::{Context, EventType, Matcher};
 use crate::scheduler::Scheduler;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config_save_lock: save_lock.clone(),
         db: db.clone(),
         scheduler: scheduler.clone(),
+        matcher: Arc::new(Matcher::new()),
         config_path: config_path.to_string(),
     };
     plugins::do_init(init_ctx).await?;
@@ -110,14 +111,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // 执行清理工作
-    // 停止所有定时任务，消除副作用
     scheduler.shutdown();
-
     let _ = db.close().await;
 
     // 退出前强制再保存一次配置，确保万无一失
-    if let Ok(guard) = shared_config.read() {
-        if let Err(e) = guard.save(config_path).await {
+    let config_snapshot = if let Ok(guard) = shared_config.read() {
+        Some(guard.clone())
+    } else {
+        eprintln!("无法获取配置锁，跳过保存。");
+        None
+    };
+
+    if let Some(cfg) = config_snapshot {
+        if let Err(e) = cfg.save(config_path).await {
             eprintln!("退出前保存配置失败: {}", e);
         } else {
             println!("配置已保存。");

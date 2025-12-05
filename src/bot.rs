@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, BotConfig};
-use crate::event::{Context, Event, EventType, SendPacket};
+use crate::event::{Context, Event, EventType, Matcher, SendPacket};
 use crate::plugins;
 use crate::scheduler::Scheduler;
 use futures_util::{SinkExt, StreamExt};
@@ -75,6 +75,9 @@ async fn connect_and_listen(
 
     let (mut write_half, mut read_half) = ws_stream.split();
 
+    // 每个连接初始化一个 Matcher，用于处理该 Bot 的交互式等待
+    let matcher = Arc::new(Matcher::new());
+
     while let Some(message) = read_half.next().await {
         match message {
             Ok(WsMessage::Text(text)) => {
@@ -87,6 +90,7 @@ async fn connect_and_listen(
                     scheduler.clone(),
                     save_lock.clone(),
                     config_path.clone(),
+                    matcher.clone(),
                 )
                 .await
                 {
@@ -101,6 +105,7 @@ async fn connect_and_listen(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_frame(
     data: &mut [u8],
     writer: &mut WsWriter,
@@ -109,10 +114,18 @@ async fn process_frame(
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
     config_path: String,
+    matcher: Arc<Matcher>,
 ) -> Result<(), BotError> {
     let event: Event = match simd_json::to_owned_value(data) {
         Ok(v) => v,
         Err(_) => return Ok(()),
+    };
+
+    // 优先尝试分发给等待者 (交互式输入)
+    // 如果 dispatch 返回 None，说明消息被等待者消费了，不再走常规插件流程
+    let event = match matcher.dispatch(event).await {
+        Some(e) => e,
+        None => return Ok(()),
     };
 
     let ctx = Context {
@@ -121,6 +134,7 @@ async fn process_frame(
         config_save_lock: save_lock,
         db,
         scheduler,
+        matcher,
         config_path,
     };
 
@@ -153,9 +167,14 @@ where
         message,
     };
 
+    let json_str = simd_json::to_string(&params)?;
+    let mut json_bytes = json_str.into_bytes();
+    let params_val =
+        simd_json::to_owned_value(&mut json_bytes).map_err(|e| Box::new(e) as BotError)?;
+
     let packet = SendPacket {
         action: "send_msg".to_string(),
-        params: serde_json::to_value(params)?,
+        params: params_val,
     };
 
     let new_ctx = Context {
@@ -164,6 +183,7 @@ where
         config_save_lock: ctx.config_save_lock.clone(),
         db: ctx.db.clone(),
         scheduler: ctx.scheduler.clone(),
+        matcher: ctx.matcher.clone(),
         config_path: ctx.config_path.clone(),
     };
 

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::bot::{WsWriter, send_frame_raw};
-use crate::event::{Context, EventType};
+use crate::event::{Context, Event, EventType};
 use futures_util::future::BoxFuture;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
@@ -11,7 +11,9 @@ use tokio::fs;
 use toml::Value;
 
 pub mod filter_meta_event;
+pub mod logger;
 pub mod ping_pong;
+pub mod repeater;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -23,7 +25,6 @@ pub type PluginInitHandler = fn(Context) -> BoxFuture<'static, Result<(), Plugin
 pub struct Plugin {
     pub name: &'static str,
     pub handler: PluginHandler,
-    /// 初始化钩子：Bot 启动时执行一次
     pub on_init: Option<PluginInitHandler>,
     pub default_config: fn() -> Value,
 }
@@ -41,10 +42,22 @@ pub fn get_plugins() -> &'static [Plugin] {
                 default_config: filter_meta_event::default_config,
             },
             Plugin {
+                name: "logger",
+                handler: logger::handle,
+                on_init: None,
+                default_config: logger::default_config,
+            },
+            Plugin {
                 name: "ping_pong",
                 handler: ping_pong::handle,
                 on_init: Some(ping_pong::init),
                 default_config: ping_pong::default_config,
+            },
+            Plugin {
+                name: "repeater",
+                handler: repeater::handle,
+                on_init: None,
+                default_config: repeater::default_config,
             },
         ]
     })
@@ -61,13 +74,13 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
 
     for plugin in plugins {
         if let Some(init_fn) = plugin.on_init {
-            // 构造上下文副本传递给初始化函数
             let init_ctx = Context {
                 event: EventType::Init,
                 config: ctx.config.clone(),
                 config_save_lock: ctx.config_save_lock.clone(),
                 db: ctx.db.clone(),
                 scheduler: ctx.scheduler.clone(),
+                matcher: ctx.matcher.clone(),
                 config_path: ctx.config_path.clone(),
             };
 
@@ -82,6 +95,7 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// 运行插件流水线
 pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
@@ -111,7 +125,8 @@ pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginEr
     match ctx.event {
         EventType::Onebot(_) => {}
         EventType::BeforeSend(packet) => {
-            let json_str = serde_json::to_string(&packet)?;
+            // 已替换 serde_json::to_string 为 simd_json::to_string
+            let json_str = simd_json::to_string(&packet)?;
             send_frame_raw(writer, json_str).await?;
         }
         EventType::Init => {}
@@ -121,6 +136,24 @@ pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginEr
 }
 
 // ================= 工具函数 =================
+
+/// 将伪造/修改过的事件推送回流水线
+pub async fn send_fake_event(
+    ctx: &Context,
+    writer: &mut WsWriter,
+    event: Event,
+) -> Result<(), PluginError> {
+    let new_ctx = Context {
+        event: EventType::Onebot(event),
+        config: ctx.config.clone(),
+        config_save_lock: ctx.config_save_lock.clone(),
+        db: ctx.db.clone(),
+        scheduler: ctx.scheduler.clone(),
+        matcher: ctx.matcher.clone(),
+        config_path: ctx.config_path.clone(),
+    };
+    run(new_ctx, writer).await
+}
 
 pub async fn get_data_dir(plugin_name: &str) -> Result<PathBuf, PluginError> {
     let mut path = std::env::current_exe()?
@@ -137,10 +170,10 @@ pub async fn get_data_dir(plugin_name: &str) -> Result<PathBuf, PluginError> {
 
 pub fn build_config<T: Serialize>(data: T) -> Value {
     let mut val = Value::try_from(data).unwrap_or(Value::Table(Default::default()));
-    if let Value::Table(ref mut map) = val {
-        if !map.contains_key("enabled") {
-            map.insert("enabled".to_string(), Value::Boolean(true));
-        }
+    if let Value::Table(ref mut map) = val
+        && !map.contains_key("enabled")
+    {
+        map.insert("enabled".to_string(), Value::Boolean(true));
     }
     val
 }
@@ -164,12 +197,12 @@ where
 {
     {
         let mut guard = ctx.config.write().unwrap();
-        if let Some(v) = guard.plugins.get_mut(plugin_name) {
-            if let Ok(current_cfg) = T::deserialize(v.clone()) {
-                let new_cfg = f(current_cfg);
-                if let Ok(new_val) = Value::try_from(new_cfg) {
-                    *v = new_val;
-                }
+        if let Some(v) = guard.plugins.get_mut(plugin_name)
+            && let Ok(current_cfg) = T::deserialize(v.clone())
+        {
+            let new_cfg = f(current_cfg);
+            if let Ok(new_val) = Value::try_from(new_cfg) {
+                *v = new_val;
             }
         }
     }

@@ -1,12 +1,33 @@
 use crate::bot::{WsWriter, send_msg};
-use crate::event::{Context, EventType};
+use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, build_config, get_prefix};
 use futures_util::future::BoxFuture;
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, PaginatorTrait, Schema, Set};
 use serde::{Deserialize, Serialize};
-use simd_json::derived::ValueObjectAccessAsScalar;
 use toml::Value;
+
+mod entity {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "plugin_ping_stats")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i32,
+        pub user_id: i64,
+        #[sea_orm(default_expr = "Expr::current_timestamp()")]
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+use entity::ActiveModel as PingStatsActiveModel;
+use entity::Entity as PingStats;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PingConfig {
@@ -22,24 +43,20 @@ pub fn default_config() -> Value {
     build_config(PingConfig { enabled: true })
 }
 
-/// 初始化钩子：只在启动时执行一次，用于建表
 pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     Box::pin(async move {
         let db = &ctx.db;
-        let create_table_sql = r#"
-            CREATE TABLE IF NOT EXISTS plugin_ping_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
+        let builder = db.get_database_backend();
+        let schema = Schema::new(builder);
 
-        db.execute(Statement::from_string(
-            DbBackend::Sqlite,
-            create_table_sql.to_owned(),
-        ))
-        .await
-        .map_err(|e| format!("PingPong Plugin Init DB Error: {}", e))?;
+        let mut create_table_stmt = schema.create_table_from_entity(PingStats);
+        create_table_stmt.if_not_exists();
+
+        let stmt = builder.build(&create_table_stmt);
+
+        db.execute(stmt)
+            .await
+            .map_err(|e| format!("PingPong Plugin Init DB Error: {}", e))?;
 
         Ok(())
     })
@@ -50,54 +67,54 @@ pub fn handle<'a>(
     writer: &'a mut WsWriter,
 ) -> BoxFuture<'a, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let event = match &ctx.event {
-            EventType::Onebot(e) => e,
-            _ => return Ok(Some(ctx)),
-        };
-
-        if let Some("message") = event.get_str("post_type")
-            && let Some(raw_msg) = event.get_str("raw_message")
-        {
+        if let Some(msg) = ctx.as_message() {
             let prefix = get_prefix(&ctx);
             let target_cmd = format!("{}ping", prefix);
 
-            if raw_msg == target_cmd {
-                println!("-> [Plugin] 收到 ping");
+            if msg.text() == target_cmd {
+                println!("-> [Plugin] 收到 ping 来自: {}", msg.sender_name());
                 let db = &ctx.db;
 
-                let user_id = event.get_i64("user_id").unwrap_or(0);
-                let group_id = event.get_i64("group_id");
-                let message_id = event.get_i64("message_id").unwrap_or(0);
+                let user_id = msg.user_id();
+                let group_id = msg.group_id();
+                let message_id = msg.message_id();
 
-                // 插入数据
-                let insert_sql = format!(
-                    "INSERT INTO plugin_ping_stats (user_id) VALUES ({})",
-                    user_id
-                );
-                db.execute(Statement::from_string(DbBackend::Sqlite, insert_sql))
+                let new_stat = PingStatsActiveModel {
+                    user_id: Set(user_id),
+                    ..Default::default()
+                };
+
+                new_stat
+                    .insert(db)
                     .await
                     .map_err(|e| format!("DB Insert Error: {}", e))?;
 
-                // 查询统计
-                let count_sql = "SELECT COUNT(*) as count FROM plugin_ping_stats";
-                let query_res = db
-                    .query_one(Statement::from_string(
-                        DbBackend::Sqlite,
-                        count_sql.to_owned(),
-                    ))
+                let count = PingStats::find()
+                    .count(db)
                     .await
                     .map_err(|e| format!("DB Query Error: {}", e))?;
 
-                let count: i64 = match query_res {
-                    Some(res) => res.try_get("", "count").unwrap_or(0),
-                    None => 0,
-                };
-
+                // 回复消息
                 let reply_msg = Message::new()
                     .reply(message_id)
                     .text(format!(" Pong! 全服累计 Ping 次数: {}", count));
 
                 send_msg(&ctx, writer, group_id, Some(user_id), reply_msg).await?;
+
+                // 发送合并转发消息
+                let node1 = Message::new().text("系统日志：收到心跳检测请求");
+                let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID: {}", count));
+                let node3 = Message::new()
+                    .text("这是一个自定义合并转发消息的示例。")
+                    .image("https://www.sea-ql.org/SeaORM/img/SeaORM%20banner.png");
+
+                let forward_msg = Message::new()
+                    .node_custom(10000, "System Bot", node1)
+                    .node_custom(10000, "Database", node2)
+                    .node_custom(user_id, "User Context", node3);
+
+                send_msg(&ctx, writer, group_id, Some(user_id), forward_msg).await?;
+
                 return Ok(None);
             }
         }
