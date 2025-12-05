@@ -1,24 +1,28 @@
 #![allow(dead_code)]
 
-use crate::bot::{WsWriter, send_frame_raw};
+use crate::bot::{LockedWriter, send_frame_raw};
 use crate::event::{Context, Event, EventType};
+use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::fs;
 use toml::Value;
 
+pub mod echo;
 pub mod filter_meta_event;
+pub mod group_self_title;
 pub mod logger;
 pub mod ping_pong;
+pub mod recall;
 pub mod repeater;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
 
 pub type PluginHandler =
-    fn(Context, &mut WsWriter) -> BoxFuture<'_, Result<Option<Context>, PluginError>>;
+    fn(Context, LockedWriter) -> BoxFuture<'static, Result<Option<Context>, PluginError>>;
 
 pub type PluginInitHandler = fn(Context) -> BoxFuture<'static, Result<(), PluginError>>;
 
@@ -48,10 +52,28 @@ pub fn get_plugins() -> &'static [Plugin] {
                 default_config: logger::default_config,
             },
             Plugin {
+                name: "group_self_title",
+                handler: group_self_title::handle,
+                on_init: None,
+                default_config: group_self_title::default_config,
+            },
+            Plugin {
                 name: "ping_pong",
                 handler: ping_pong::handle,
                 on_init: Some(ping_pong::init),
                 default_config: ping_pong::default_config,
+            },
+            Plugin {
+                name: "recall",
+                handler: recall::handle,
+                on_init: None,
+                default_config: recall::default_config,
+            },
+            Plugin {
+                name: "echo",
+                handler: echo::handle,
+                on_init: None,
+                default_config: echo::default_config,
             },
             Plugin {
                 name: "repeater",
@@ -70,9 +92,30 @@ pub fn register_plugins() -> &'static [Plugin] {
 /// 执行所有插件的初始化逻辑
 pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
     let plugins = get_plugins();
-    println!("正在初始化 {} 个插件...", plugins.len());
+
+    // 先计算启用的插件，以便输出统计信息
+    let enabled_plugins: HashSet<String> = {
+        let guard = ctx.config.read().unwrap();
+        guard
+            .plugins
+            .iter()
+            .filter(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false))
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+
+    info!(
+        target: "System",
+        "正在加载插件系统 (已启用 {}/{})",
+        enabled_plugins.len(),
+        plugins.len()
+    );
 
     for plugin in plugins {
+        if !enabled_plugins.contains(plugin.name) {
+            continue;
+        }
+
         if let Some(init_fn) = plugin.on_init {
             let init_ctx = Context {
                 event: EventType::Init,
@@ -80,23 +123,28 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
                 config_save_lock: ctx.config_save_lock.clone(),
                 db: ctx.db.clone(),
                 scheduler: ctx.scheduler.clone(),
-                matcher: ctx.matcher.clone(),
+                matcher: Arc::new(Matcher::new()),
                 config_path: ctx.config_path.clone(),
             };
 
             // 执行初始化
-            if let Err(e) = init_fn(init_ctx).await {
-                eprintln!("插件 [{}] 初始化失败: {}", plugin.name, e);
-            } else {
-                println!("插件 [{}] 初始化完成。", plugin.name);
+            match init_fn(init_ctx).await {
+                Ok(_) => {
+                    info!(target: "Plugin", "✅ [{}] 就绪 (Init Success)", plugin.name);
+                }
+                Err(e) => {
+                    error!(target: "Plugin", "❌ [{}] 初始化失败: {}", plugin.name, e);
+                }
             }
+        } else {
+            info!(target: "Plugin", "✅ [{}] 就绪", plugin.name);
         }
     }
     Ok(())
 }
 
 /// 运行插件流水线
-pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginError> {
+pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
     let enabled_plugins: HashSet<String> = {
@@ -114,7 +162,7 @@ pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginEr
             continue;
         }
 
-        match (plugin.handler)(ctx, writer).await? {
+        match (plugin.handler)(ctx, writer.clone()).await? {
             Some(next_ctx) => {
                 ctx = next_ctx;
             }
@@ -125,7 +173,6 @@ pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginEr
     match ctx.event {
         EventType::Onebot(_) => {}
         EventType::BeforeSend(packet) => {
-            // 已替换 serde_json::to_string 为 simd_json::to_string
             let json_str = simd_json::to_string(&packet)?;
             send_frame_raw(writer, json_str).await?;
         }
@@ -140,7 +187,7 @@ pub async fn run(mut ctx: Context, writer: &mut WsWriter) -> Result<(), PluginEr
 /// 将伪造/修改过的事件推送回流水线
 pub async fn send_fake_event(
     ctx: &Context,
-    writer: &mut WsWriter,
+    writer: LockedWriter,
     event: Event,
 ) -> Result<(), PluginError> {
     let new_ctx = Context {
@@ -166,16 +213,6 @@ pub async fn get_data_dir(plugin_name: &str) -> Result<PathBuf, PluginError> {
         fs::create_dir_all(&path).await?;
     }
     Ok(path)
-}
-
-pub fn build_config<T: Serialize>(data: T) -> Value {
-    let mut val = Value::try_from(data).unwrap_or(Value::Table(Default::default()));
-    if let Value::Table(ref mut map) = val
-        && !map.contains_key("enabled")
-    {
-        map.insert("enabled".to_string(), Value::Boolean(true));
-    }
-    val
 }
 
 pub fn get_config<T>(ctx: &Context, plugin_name: &str) -> Option<T>
@@ -217,8 +254,4 @@ where
     latest_config_snapshot.save(&ctx.config_path).await?;
 
     Ok(())
-}
-
-pub fn get_prefix(ctx: &Context) -> String {
-    ctx.config.read().unwrap().command_prefix.clone()
 }

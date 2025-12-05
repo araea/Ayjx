@@ -1,7 +1,8 @@
 use crate::config::{AppConfig, BotConfig};
-use crate::event::{Context, Event, EventType, Matcher, SendPacket};
-use crate::plugins;
+use crate::event::{Context, Event, EventType, SendPacket};
+use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
+use crate::{error, info, plugins, warn};
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderValue;
 use sea_orm::DatabaseConnection;
@@ -19,6 +20,8 @@ pub type BotError = Box<dyn std::error::Error + Send + Sync>;
 
 pub type WsWriter =
     futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>;
+
+pub type LockedWriter = Arc<AsyncMutex<WsWriter>>;
 
 #[derive(Serialize)]
 struct SendParamsInner<T> {
@@ -49,8 +52,10 @@ pub async fn run_bot_loop(
         )
         .await
         {
-            Ok(()) => eprintln!("Bot [{}] 连接断开，3秒后重连...", bot_config.url),
-            Err(e) => eprintln!("Bot [{}] 连接失败: {}。3秒后重试...", bot_config.url, e),
+            Ok(()) => warn!(target: "Bot", "Bot [{}] 连接断开，3秒后重连...", bot_config.url),
+            Err(e) => {
+                error!(target: "Bot", "Bot [{}] 连接失败: {}。3秒后重试...", bot_config.url, e)
+            }
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -71,9 +76,10 @@ async fn connect_and_listen(
         .insert("Authorization", HeaderValue::from_str(&token_header)?);
 
     let (ws_stream, _) = connect_async(request).await?;
-    println!("Bot [{}] 连接成功！", config.url);
+    info!(target: "Bot", "Bot [{}] 连接成功！", config.url);
 
-    let (mut write_half, mut read_half) = ws_stream.split();
+    let (write_half, mut read_half) = ws_stream.split();
+    let writer = Arc::new(AsyncMutex::new(write_half));
 
     // 每个连接初始化一个 Matcher，用于处理该 Bot 的交互式等待
     let matcher = Arc::new(Matcher::new());
@@ -82,20 +88,32 @@ async fn connect_and_listen(
         match message {
             Ok(WsMessage::Text(text)) => {
                 let mut data = text.as_bytes().to_vec();
-                if let Err(e) = process_frame(
-                    &mut data,
-                    &mut write_half,
-                    global_config.clone(),
-                    db.clone(),
-                    scheduler.clone(),
-                    save_lock.clone(),
-                    config_path.clone(),
-                    matcher.clone(),
-                )
-                .await
-                {
-                    eprintln!("Event processing error: {}", e);
-                }
+
+                // 克隆资源以移动到新任务中
+                let writer = writer.clone();
+                let config = global_config.clone();
+                let db = db.clone();
+                let scheduler = scheduler.clone();
+                let save_lock = save_lock.clone();
+                let config_path = config_path.clone();
+                let matcher = matcher.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = process_frame(
+                        &mut data,
+                        writer,
+                        config,
+                        db,
+                        scheduler,
+                        save_lock,
+                        config_path,
+                        matcher,
+                    )
+                    .await
+                    {
+                        error!(target: "Bot", "Event processing error: {}", e);
+                    }
+                });
             }
             Ok(WsMessage::Close(_)) => return Ok(()),
             Err(e) => return Err(Box::new(e)),
@@ -108,7 +126,7 @@ async fn connect_and_listen(
 #[allow(clippy::too_many_arguments)]
 async fn process_frame(
     data: &mut [u8],
-    writer: &mut WsWriter,
+    writer: LockedWriter,
     config: Arc<RwLock<AppConfig>>,
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
@@ -121,8 +139,7 @@ async fn process_frame(
         Err(_) => return Ok(()),
     };
 
-    // 优先尝试分发给等待者 (交互式输入)
-    // 如果 dispatch 返回 None，说明消息被等待者消费了，不再走常规插件流程
+    // 优先尝试分发给等待者 (交互式输入/API响应)
     let event = match matcher.dispatch(event).await {
         Some(e) => e,
         None => return Ok(()),
@@ -144,7 +161,7 @@ async fn process_frame(
 
 pub async fn send_msg<M>(
     ctx: &Context,
-    writer: &mut WsWriter,
+    writer: LockedWriter,
     group_id: Option<i64>,
     user_id: Option<i64>,
     message: M,
@@ -191,7 +208,8 @@ where
     Ok(())
 }
 
-pub async fn send_frame_raw(writer: &mut WsWriter, json_str: String) -> Result<(), BotError> {
-    writer.send(WsMessage::Text(json_str.into())).await?;
+pub async fn send_frame_raw(writer: LockedWriter, json_str: String) -> Result<(), BotError> {
+    let mut guard = writer.lock().await;
+    guard.send(WsMessage::Text(json_str.into())).await?;
     Ok(())
 }

@@ -1,13 +1,19 @@
+mod api;
 mod bot;
+mod command;
 mod config;
 mod db;
 mod event;
+#[macro_use]
+mod log;
+mod matcher;
 mod message;
 mod plugins;
 mod scheduler;
 
 use crate::config::AppConfig;
-use crate::event::{Context, EventType, Matcher};
+use crate::event::{Context, EventType};
+use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -35,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     for plugin in registered_plugins {
         if !app_config.plugins.contains_key(plugin.name) {
-            println!("检测到新插件 [{}]，写入默认配置...", plugin.name);
+            info!("检测到新插件 [{}]，写入默认配置...", plugin.name);
             app_config
                 .plugins
                 .insert(plugin.name.to_string(), (plugin.default_config)());
@@ -46,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config_dirty || !Path::new(config_path).exists() {
         app_config.save(config_path).await?;
         if config_dirty {
-            println!("配置文件已更新。");
+            info!("配置文件已更新。");
         }
     }
 
@@ -74,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut active_bots = 0;
     for bot_conf in app_config.bots {
         if bot_conf.access_token.trim().is_empty() {
-            println!("Bot [{}] Token 为空，跳过。", bot_conf.url);
+            warn!("Bot [{}] Token 为空，跳过。", bot_conf.url);
             continue;
         }
 
@@ -98,15 +104,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
     }
 
-    println!("激活 Bot 数量: {}。按 Ctrl+C 退出。", active_bots);
+    info!("激活 Bot 数量: {}。按 Ctrl+C 退出。", active_bots);
 
     // 等待退出信号 (优雅关闭)
     match signal::ctrl_c().await {
         Ok(()) => {
-            println!("\n收到退出信号，正在清理资源...");
+            info!("\n收到退出信号，正在清理资源...");
         }
         Err(err) => {
-            eprintln!("监听信号失败: {}", err);
+            error!("监听信号失败: {}", err);
         }
     }
 
@@ -118,18 +124,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config_snapshot = if let Ok(guard) = shared_config.read() {
         Some(guard.clone())
     } else {
-        eprintln!("无法获取配置锁，跳过保存。");
+        error!("无法获取配置锁，跳过保存。");
         None
     };
 
     if let Some(cfg) = config_snapshot {
         if let Err(e) = cfg.save(config_path).await {
-            eprintln!("退出前保存配置失败: {}", e);
+            error!("退出前保存配置失败: {}", e);
         } else {
-            println!("配置已保存。");
+            info!("配置已保存。");
         }
     }
 
-    println!("再见！");
+    info!("Bye!");
     Ok(())
 }

@@ -1,7 +1,9 @@
-use crate::bot::{WsWriter, send_msg};
+use crate::bot::{LockedWriter, send_msg};
+use crate::command::match_command;
+use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, build_config, get_prefix};
+use crate::plugins::PluginError;
 use futures_util::future::BoxFuture;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, PaginatorTrait, Schema, Set};
 use serde::{Deserialize, Serialize};
@@ -62,61 +64,57 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     })
 }
 
-pub fn handle<'a>(
+pub fn handle(
     ctx: Context,
-    writer: &'a mut WsWriter,
-) -> BoxFuture<'a, Result<Option<Context>, PluginError>> {
+    writer: LockedWriter,
+) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        if let Some(msg) = ctx.as_message() {
-            let prefix = get_prefix(&ctx);
-            let target_cmd = format!("{}ping", prefix);
+        if let Some(_cmd) = match_command(&ctx, "ping") {
+            let msg = ctx.as_message().unwrap();
 
-            if msg.text() == target_cmd {
-                println!("-> [Plugin] 收到 ping 来自: {}", msg.sender_name());
-                let db = &ctx.db;
+            let db = &ctx.db;
 
-                let user_id = msg.user_id();
-                let group_id = msg.group_id();
-                let message_id = msg.message_id();
+            let user_id = msg.user_id();
+            let group_id = msg.group_id();
+            let message_id = msg.message_id();
 
-                let new_stat = PingStatsActiveModel {
-                    user_id: Set(user_id),
-                    ..Default::default()
-                };
+            let new_stat = PingStatsActiveModel {
+                user_id: Set(user_id),
+                ..Default::default()
+            };
 
-                new_stat
-                    .insert(db)
-                    .await
-                    .map_err(|e| format!("DB Insert Error: {}", e))?;
+            new_stat
+                .insert(db)
+                .await
+                .map_err(|e| format!("DB Insert Error: {}", e))?;
 
-                let count = PingStats::find()
-                    .count(db)
-                    .await
-                    .map_err(|e| format!("DB Query Error: {}", e))?;
+            let count = PingStats::find()
+                .count(db)
+                .await
+                .map_err(|e| format!("DB Query Error: {}", e))?;
 
-                // 回复消息
-                let reply_msg = Message::new()
-                    .reply(message_id)
-                    .text(format!(" Pong! 全服累计 Ping 次数: {}", count));
+            // 回复消息
+            let reply_msg = Message::new()
+                .reply(message_id)
+                .text(format!("Pong! 全服累计 Ping 次数: {}", count));
 
-                send_msg(&ctx, writer, group_id, Some(user_id), reply_msg).await?;
+            send_msg(&ctx, writer.clone(), group_id, Some(user_id), reply_msg).await?;
 
-                // 发送合并转发消息
-                let node1 = Message::new().text("系统日志：收到心跳检测请求");
-                let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID: {}", count));
-                let node3 = Message::new()
-                    .text("这是一个自定义合并转发消息的示例。")
-                    .image("https://www.sea-ql.org/SeaORM/img/SeaORM%20banner.png");
+            // 发送合并转发消息
+            let node1 = Message::new().text("系统日志：收到心跳检测请求");
+            let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID: {}", count));
+            let node3 = Message::new()
+                .text("这是一个自定义合并转发消息的示例。")
+                .image("https://www.sea-ql.org/SeaORM/img/SeaORM%20banner.png");
 
-                let forward_msg = Message::new()
-                    .node_custom(10000, "System Bot", node1)
-                    .node_custom(10000, "Database", node2)
-                    .node_custom(user_id, "User Context", node3);
+            let forward_msg = Message::new()
+                .node_custom(10000, "System Bot", node1)
+                .node_custom(10000, "Database", node2)
+                .node_custom(user_id, "User Context", node3);
 
-                send_msg(&ctx, writer, group_id, Some(user_id), forward_msg).await?;
+            send_msg(&ctx, writer, group_id, Some(user_id), forward_msg).await?;
 
-                return Ok(None);
-            }
+            return Ok(None);
         }
 
         Ok(Some(ctx))

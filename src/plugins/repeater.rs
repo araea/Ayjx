@@ -1,6 +1,7 @@
-use crate::bot::{WsWriter, send_msg};
+use crate::bot::{LockedWriter, send_msg};
+use crate::config::build_config;
 use crate::event::{Context, EventType};
-use crate::plugins::{PluginError, build_config, get_config};
+use crate::plugins::{PluginError, get_config};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
@@ -64,10 +65,10 @@ fn check_probability(probability: f64) -> bool {
     random_val < probability
 }
 
-pub fn handle<'a>(
+pub fn handle(
     ctx: Context,
-    writer: &'a mut WsWriter,
-) -> BoxFuture<'a, Result<Option<Context>, PluginError>> {
+    writer: LockedWriter,
+) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
         let config: RepeaterConfig = get_config(&ctx, "repeater").unwrap_or_default();
 
@@ -124,7 +125,7 @@ pub fn handle<'a>(
             };
 
             if should_repeat {
-                println!("-> [Repeater] 触发复读");
+                debug!(target: "Plugin/Repeater", "触发复读");
                 let group_id = msg.group_id();
                 send_msg(&ctx, writer, group_id, None, content).await?;
             }

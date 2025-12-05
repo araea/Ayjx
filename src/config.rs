@@ -5,9 +5,9 @@ use toml::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
-    // 全局指令前缀
+    // 全局指令前缀（支持多个，如 ["/", "#"]）
     #[serde(default = "default_prefix")]
-    pub command_prefix: String,
+    pub command_prefix: Vec<String>,
 
     // Bot 连接配置
     #[serde(default)]
@@ -26,8 +26,8 @@ impl AppConfig {
     }
 }
 
-fn default_prefix() -> String {
-    "/".to_string()
+fn default_prefix() -> Vec<String> {
+    vec!["/".to_string()]
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -39,7 +39,7 @@ pub struct BotConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            command_prefix: "/".to_string(),
+            command_prefix: vec!["/".to_string()],
             bots: vec![BotConfig {
                 url: "ws://127.0.0.1:3001".to_string(),
                 access_token: "".to_string(),
@@ -47,4 +47,15 @@ impl Default for AppConfig {
             plugins: HashMap::new(),
         }
     }
+}
+
+/// 辅助函数：构建默认配置 Value，并确保包含 enabled 字段
+pub fn build_config<T: Serialize>(data: T) -> Value {
+    let mut val = Value::try_from(data).unwrap_or(Value::Table(Default::default()));
+    if let Value::Table(ref mut map) = val
+        && !map.contains_key("enabled")
+    {
+        map.insert("enabled".to_string(), Value::Boolean(true));
+    }
+    val
 }

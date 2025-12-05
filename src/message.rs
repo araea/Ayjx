@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simd_json::owned::{Object, Value};
 
 /// 消息段 (Segment)
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Segment {
     #[serde(rename = "type")]
     pub type_: String,
@@ -21,8 +21,8 @@ impl Segment {
 }
 
 /// 消息链 (Message Chain)
-#[derive(Debug, Serialize, Clone, Default)]
-pub struct Message(Vec<Segment>);
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Message(pub Vec<Segment>);
 
 impl Message {
     pub fn new() -> Self {

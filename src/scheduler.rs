@@ -124,7 +124,7 @@ impl Scheduler {
     }
 
     pub fn shutdown(&self) {
-        println!("正在清理定时任务...");
+        info!("正在清理定时任务...");
         let mut tasks = self.tasks.lock().unwrap();
         for (_, handle) in tasks.drain() {
             handle.abort();
