@@ -25,7 +25,7 @@ pub struct LoginUser {
 pub struct BotStatus {
     pub adapter: String,
     pub platform: String,
-    pub bot: LoginUser,
+    pub login_user: LoginUser,
 }
 
 /// 统一的上下文，包含事件数据、可变配置和任务调度器
@@ -181,5 +181,10 @@ impl SendPacket {
     /// 获取 message 字段的 Value
     pub fn message(&self) -> Option<&OwnedValue> {
         self.params.get("message")
+    }
+
+    /// 获取消息类型字符串，返回 Option，若不存在则返回 None
+    pub fn message_type(&self) -> Option<&str> {
+        self.params.get_str("message_type")
     }
 }

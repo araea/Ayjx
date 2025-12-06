@@ -135,7 +135,7 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
                 bot: BotStatus {
                     adapter: "system".to_string(),
                     platform: "internal".to_string(),
-                    bot: Default::default(),
+                    login_user: Default::default(),
                 },
             };
 

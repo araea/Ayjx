@@ -68,7 +68,7 @@ pub fn entry(
         let bot_status = BotStatus {
             adapter: "console".to_string(),
             platform: "console".to_string(),
-            bot: LoginUser {
+            login_user: LoginUser {
                 id: "0".to_string(),
                 name: Some("ConsoleBot".to_string()),
                 nick: Some("ConsoleBot".to_string()),

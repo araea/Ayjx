@@ -39,12 +39,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config_dirty = false;
 
     for plugin in registered_plugins {
-        if !app_config.plugins.contains_key(plugin.name) {
-            info!("检测到新插件 [{}]，写入默认配置...", plugin.name);
-            app_config
-                .plugins
-                .insert(plugin.name.to_string(), (plugin.default_config)());
-            config_dirty = true;
+        let default_config = (plugin.default_config)();
+
+        match app_config.plugins.get_mut(plugin.name) {
+            Some(existing_config) => {
+                // 如果配置已存在，尝试合并默认配置中的新字段
+                if let toml::Value::Table(existing_table) = existing_config {
+                    if let toml::Value::Table(default_table) = default_config {
+                        for (key, value) in default_table {
+                            if !existing_table.contains_key(&key) {
+                                info!("插件 [{}] 配置补全: 新增字段 '{}'", plugin.name, key);
+                                existing_table.insert(key, value);
+                                config_dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                info!("检测到新插件 [{}]，写入默认配置...", plugin.name);
+                app_config
+                    .plugins
+                    .insert(plugin.name.to_string(), default_config);
+                config_dirty = true;
+            }
         }
     }
 
@@ -74,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         bot: BotStatus {
             adapter: "system".to_string(),
             platform: "internal".to_string(),
-            bot: Default::default(),
+            login_user: Default::default(),
         },
     };
     plugins::do_init(init_ctx).await?;

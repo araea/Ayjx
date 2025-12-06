@@ -105,12 +105,13 @@ async fn connect_and_listen(
     let mut request = url.into_client_request()?;
 
     if let Some(token) = &config.access_token
-        && !token.is_empty() {
-            let token_header = format!("Bearer {}", token);
-            request
-                .headers_mut()
-                .insert("Authorization", HeaderValue::from_str(&token_header)?);
-        }
+        && !token.is_empty()
+    {
+        let token_header = format!("Bearer {}", token);
+        request
+            .headers_mut()
+            .insert("Authorization", HeaderValue::from_str(&token_header)?);
+    }
 
     let (ws_stream, _) = connect_async(request).await?;
     info!(target: "Bot", "Bot [{}] 连接成功！(OneBot)", url);
@@ -124,7 +125,7 @@ async fn connect_and_listen(
     let bot_status = Arc::new(RwLock::new(BotStatus {
         adapter: "onebot".to_string(),
         platform: "qq".to_string(), // 默认为 QQ，后续可根据协议细分
-        bot: LoginUser {
+        login_user: LoginUser {
             id: "0".to_string(),
             ..Default::default()
         },
@@ -160,14 +161,14 @@ async fn connect_and_listen(
             match api::get_login_info(&ctx, writer_ref).await {
                 Ok(info) => {
                     let mut guard = status_ref.write().unwrap();
-                    guard.bot.id = info.user_id.to_string();
-                    guard.bot.name = Some(info.nickname.clone());
-                    guard.bot.nick = Some(info.nickname);
-                    guard.bot.avatar = Some(format!(
+                    guard.login_user.id = info.user_id.to_string();
+                    guard.login_user.name = Some(info.nickname.clone());
+                    guard.login_user.nick = Some(info.nickname);
+                    guard.login_user.avatar = Some(format!(
                         "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
                         info.user_id
                     ));
-                    info!(target: "Bot", "已获取登录信息: {} ({})", guard.bot.name.as_deref().unwrap_or("Unknown"), guard.bot.id);
+                    info!(target: "Bot", "已获取登录信息: {} ({})", guard.login_user.name.as_deref().unwrap_or("Unknown"), guard.login_user.id);
                 }
                 Err(e) => {
                     warn!(target: "Bot", "获取登录信息失败: {}", e);
