@@ -13,6 +13,21 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub type Event = OwnedValue;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LoginUser {
+    pub id: String,
+    pub name: Option<String>,
+    pub nick: Option<String>,
+    pub avatar: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BotStatus {
+    pub adapter: String,
+    pub platform: String,
+    pub bot: LoginUser,
+}
+
 /// 统一的上下文，包含事件数据、可变配置和任务调度器
 pub struct Context {
     pub event: EventType,
@@ -22,6 +37,7 @@ pub struct Context {
     pub scheduler: Arc<Scheduler>,
     pub matcher: Arc<Matcher>,
     pub config_path: String,
+    pub bot: BotStatus,
 }
 
 impl Context {
@@ -149,6 +165,9 @@ pub enum EventType {
 pub struct SendPacket {
     pub action: String,
     pub params: OwnedValue,
+    /// 原始触发事件（不参与序列化发送给 Bot）
+    #[serde(skip)]
+    pub original_event: Option<Event>,
 }
 
 impl SendPacket {

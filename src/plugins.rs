@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
-// 引用重构后的 OneBot 适配器逻辑
 use crate::adapters::onebot::{LockedWriter, send_frame_raw};
-use crate::event::{Context, Event, EventType};
+use crate::event::{BotStatus, Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
 use serde::{Serialize, de::DeserializeOwned};
@@ -18,6 +17,7 @@ pub mod group_self_title;
 pub mod logger;
 pub mod ping_pong;
 pub mod recall;
+pub mod recorder;
 pub mod repeater;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
@@ -51,6 +51,12 @@ pub fn get_plugins() -> &'static [Plugin] {
                 handler: logger::handle,
                 on_init: None,
                 default_config: logger::default_config,
+            },
+            Plugin {
+                name: "recorder",
+                handler: recorder::handle,
+                on_init: Some(recorder::init),
+                default_config: recorder::default_config,
             },
             Plugin {
                 name: "group_self_title",
@@ -126,6 +132,11 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
                 scheduler: ctx.scheduler.clone(),
                 matcher: Arc::new(Matcher::new()),
                 config_path: ctx.config_path.clone(),
+                bot: BotStatus {
+                    adapter: "system".to_string(),
+                    platform: "internal".to_string(),
+                    bot: Default::default(),
+                },
             };
 
             // 执行初始化
@@ -199,6 +210,7 @@ pub async fn send_fake_event(
         scheduler: ctx.scheduler.clone(),
         matcher: ctx.matcher.clone(),
         config_path: ctx.config_path.clone(),
+        bot: ctx.bot.clone(),
     };
     run(new_ctx, writer).await
 }

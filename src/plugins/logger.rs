@@ -1,21 +1,26 @@
 use crate::adapters::onebot::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
-use crate::plugins::PluginError;
+use crate::plugins::{PluginError, get_config};
 use futures_util::future::BoxFuture;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsScalar};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct LoggerConfig {
     enabled: bool,
+    #[serde(default)]
+    debug: bool,
 }
 
 pub fn default_config() -> Value {
-    build_config(LoggerConfig { enabled: true })
+    build_config(LoggerConfig {
+        enabled: true,
+        debug: false,
+    })
 }
 
 pub fn handle(
@@ -23,8 +28,18 @@ pub fn handle(
     _writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
+        // 获取配置
+        let config: LoggerConfig = get_config(&ctx, "logger").unwrap_or(LoggerConfig {
+            enabled: true,
+            debug: false,
+        });
+
         match &ctx.event {
             EventType::Onebot(ev) => {
+                if config.debug {
+                    debug!(target: "Logger", "ev: {:?}", ev);
+                }
+
                 if let Some(msg) = ctx.as_message() {
                     let content = format_message(ev.get("message"));
                     let sender = format!("{}({})", msg.sender_name(), msg.user_id());
@@ -52,6 +67,9 @@ pub fn handle(
                 }
             }
             EventType::BeforeSend(packet) => {
+                if config.debug {
+                    debug!(target: "Logger", "packet: {:?}", packet);
+                }
                 if packet.action == "send_msg" {
                     let params = &packet.params;
                     let msg_type = params.get_str("message_type").unwrap_or("unknown");

@@ -263,3 +263,18 @@ pub async fn get_group_member_info(
     };
     call_action(ctx, writer, "get_group_member_info", params).await
 }
+
+// --- get_login_info ---
+
+#[derive(Serialize)]
+struct GetLoginInfoParams {}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginInfo {
+    pub user_id: i64,
+    pub nickname: String,
+}
+
+pub async fn get_login_info(ctx: &Context, writer: LockedWriter) -> Result<LoginInfo, ApiError> {
+    call_action(ctx, writer, "get_login_info", GetLoginInfoParams {}).await
+}

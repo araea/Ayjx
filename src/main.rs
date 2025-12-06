@@ -11,7 +11,7 @@ mod plugins;
 mod scheduler;
 
 use crate::config::AppConfig;
-use crate::event::{Context, EventType};
+use crate::event::{BotStatus, Context, EventType};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
 use std::path::Path;
@@ -71,6 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         scheduler: scheduler.clone(),
         matcher: Arc::new(Matcher::new()),
         config_path: config_path.to_string(),
+        bot: BotStatus {
+            adapter: "system".to_string(),
+            platform: "internal".to_string(),
+            bot: Default::default(),
+        },
     };
     plugins::do_init(init_ctx).await?;
     // ==========================================

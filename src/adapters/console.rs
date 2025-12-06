@@ -1,5 +1,6 @@
 use crate::adapters::onebot::{LockedWriter, process_frame};
 use crate::config::{AppConfig, BotConfig};
+use crate::event::{BotStatus, LoginUser};
 use crate::matcher::Matcher;
 use crate::message::Message;
 use crate::scheduler::Scheduler;
@@ -63,6 +64,18 @@ pub fn entry(
         let writer: LockedWriter = Arc::new(AsyncMutex::new(Box::new(ConsoleSink)));
         let matcher = Arc::new(Matcher::new());
 
+        // 定义模拟 Bot 信息
+        let bot_status = BotStatus {
+            adapter: "console".to_string(),
+            platform: "console".to_string(),
+            bot: LoginUser {
+                id: "0".to_string(),
+                name: Some("ConsoleBot".to_string()),
+                nick: Some("ConsoleBot".to_string()),
+                avatar: None,
+            },
+        };
+
         // 循环读取标准输入
         while let Ok(Some(line)) = reader.next_line().await {
             let line = line.trim();
@@ -116,6 +129,7 @@ pub fn entry(
                 save_lock.clone(),
                 config_path.clone(),
                 matcher.clone(),
+                bot_status.clone(),
             )
             .await
             {
@@ -145,24 +159,25 @@ impl Sink<WsMessage> for ConsoleSink {
                     && (action == "send_msg"
                         || action == "send_private_msg"
                         || action == "send_group_msg")
-                        && let Some(params) = val.get("params") {
-                            let msg_content = if let Some(msg_val) = params.get("message") {
-                                // 简单格式化
-                                if msg_val.is_array() {
-                                    format!("{:?}", msg_val)
-                                } else if let Some(s) = msg_val.as_str() {
-                                    s.to_string()
-                                } else {
-                                    format!("{:?}", msg_val)
-                                }
-                            } else {
-                                String::from("[无内容]")
-                            };
-
-                            // 打印 Bot 回复
-                            println!("\x1b[36m[Bot Reply] > \x1b[0m{}", msg_content);
-                            return Ok(());
+                    && let Some(params) = val.get("params")
+                {
+                    let msg_content = if let Some(msg_val) = params.get("message") {
+                        // 简单格式化
+                        if msg_val.is_array() {
+                            format!("{:?}", msg_val)
+                        } else if let Some(s) = msg_val.as_str() {
+                            s.to_string()
+                        } else {
+                            format!("{:?}", msg_val)
                         }
+                    } else {
+                        String::from("[无内容]")
+                    };
+
+                    // 打印 Bot 回复
+                    println!("\x1b[36m[Bot Reply] > \x1b[0m{}", msg_content);
+                    return Ok(());
+                }
                 // 非 send_msg 动作，打印原始动作
                 println!(
                     "\x1b[90m[API Call] > {}\x1b[0m",

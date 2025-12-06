@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, BotConfig};
-use crate::event::{Context, Event, EventType, SendPacket};
+use crate::event::{BotStatus, Context, Event, EventType, LoginUser, SendPacket};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
 use crate::{error, info, plugins, warn};
@@ -104,14 +104,13 @@ async fn connect_and_listen(
 
     let mut request = url.into_client_request()?;
 
-    if let Some(token) = &config.access_token {
-        if !token.is_empty() {
+    if let Some(token) = &config.access_token
+        && !token.is_empty() {
             let token_header = format!("Bearer {}", token);
             request
                 .headers_mut()
                 .insert("Authorization", HeaderValue::from_str(&token_header)?);
         }
-    }
 
     let (ws_stream, _) = connect_async(request).await?;
     info!(target: "Bot", "Bot [{}] 连接成功！(OneBot)", url);
@@ -119,8 +118,63 @@ async fn connect_and_listen(
     let (write_half, mut read_half) = ws_stream.split();
 
     let writer: LockedWriter = Arc::new(AsyncMutex::new(Box::new(write_half)));
-
     let matcher = Arc::new(Matcher::new());
+
+    // 初始化 Bot 状态容器
+    let bot_status = Arc::new(RwLock::new(BotStatus {
+        adapter: "onebot".to_string(),
+        platform: "qq".to_string(), // 默认为 QQ，后续可根据协议细分
+        bot: LoginUser {
+            id: "0".to_string(),
+            ..Default::default()
+        },
+    }));
+
+    // 启动后台任务获取登录信息
+    {
+        let status_ref = bot_status.clone();
+        let writer_ref = writer.clone();
+        let matcher_ref = matcher.clone();
+        let config_ref = global_config.clone();
+        let db_ref = db.clone();
+        let scheduler_ref = scheduler.clone();
+        let save_lock_ref = save_lock.clone();
+        let config_path_ref = config_path.clone();
+
+        tokio::spawn(async move {
+            // 稍微延时等待连接稳定
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            // 构建临时上下文用于调用 API
+            let ctx = Context {
+                event: EventType::Init,
+                config: config_ref,
+                config_save_lock: save_lock_ref,
+                db: db_ref,
+                scheduler: scheduler_ref,
+                matcher: matcher_ref,
+                config_path: config_path_ref,
+                bot: status_ref.read().unwrap().clone(),
+            };
+
+            match api::get_login_info(&ctx, writer_ref).await {
+                Ok(info) => {
+                    let mut guard = status_ref.write().unwrap();
+                    guard.bot.id = info.user_id.to_string();
+                    guard.bot.name = Some(info.nickname.clone());
+                    guard.bot.nick = Some(info.nickname);
+                    guard.bot.avatar = Some(format!(
+                        "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
+                        info.user_id
+                    ));
+                    info!(target: "Bot", "已获取登录信息: {} ({})", guard.bot.name.as_deref().unwrap_or("Unknown"), guard.bot.id);
+                }
+                Err(e) => {
+                    warn!(target: "Bot", "获取登录信息失败: {}", e);
+                }
+            }
+        });
+    }
 
     while let Some(message) = read_half.next().await {
         match message {
@@ -134,8 +188,12 @@ async fn connect_and_listen(
                 let save_lock = save_lock.clone();
                 let config_path = config_path.clone();
                 let matcher = matcher.clone();
+                let bot_status_ref = bot_status.clone();
 
                 tokio::spawn(async move {
+                    // 获取当前的 bot 状态快照
+                    let current_status = bot_status_ref.read().unwrap().clone();
+
                     if let Err(e) = process_frame(
                         &mut data,
                         writer,
@@ -145,6 +203,7 @@ async fn connect_and_listen(
                         save_lock,
                         config_path,
                         matcher,
+                        current_status,
                     )
                     .await
                     {
@@ -170,6 +229,7 @@ pub async fn process_frame(
     save_lock: Arc<AsyncMutex<()>>,
     config_path: String,
     matcher: Arc<Matcher>,
+    bot: BotStatus,
 ) -> Result<(), BotError> {
     let event: Event = match simd_json::to_owned_value(data) {
         Ok(v) => v,
@@ -190,6 +250,7 @@ pub async fn process_frame(
         scheduler,
         matcher,
         config_path,
+        bot,
     };
 
     plugins::run(ctx, writer).await?;
@@ -226,9 +287,17 @@ where
     let params_val =
         simd_json::to_owned_value(&mut json_bytes).map_err(|e| Box::new(e) as BotError)?;
 
+    // 捕获原始事件以便在 BeforeSend 中传递
+    let original_event = match &ctx.event {
+        EventType::Onebot(ev) => Some(ev.clone()),
+        EventType::BeforeSend(pkt) => pkt.original_event.clone(),
+        EventType::Init => None,
+    };
+
     let packet = SendPacket {
         action: "send_msg".to_string(),
         params: params_val,
+        original_event,
     };
 
     let new_ctx = Context {
@@ -239,6 +308,7 @@ where
         scheduler: ctx.scheduler.clone(),
         matcher: ctx.matcher.clone(),
         config_path: ctx.config_path.clone(),
+        bot: ctx.bot.clone(),
     };
 
     plugins::run(new_ctx, writer).await?;
