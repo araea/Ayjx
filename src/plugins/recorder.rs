@@ -11,7 +11,7 @@ use simd_json::base::{ValueAsArray, ValueAsScalar};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
-mod entity {
+pub mod entity {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -114,8 +114,8 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         // 2. 创建索引 (为了应对高频分析查询)
         // 索引定义：(列名...)
         let indexes = vec![
-            // 场景：生成群聊词云、活跃榜、时间段分布
-            // 查询条件通常是：WHERE guild_id = ? AND time > ?
+            // 场景：生成今日群聊词云、回顾昨日话题、周榜、月榜、消息量走势、活跃时段分布
+            // SQL: WHERE guild_id = ? AND time > ?
             sea_orm::sea_query::Index::create()
                 .name("idx_records_guild_time")
                 .table(RecordEntity)
@@ -123,18 +123,27 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 .col(entity::Column::Time)
                 .if_not_exists()
                 .to_owned(),
-            // 场景：生成个人词云、查看个人历史
-            // 查询条件通常是：WHERE user_id = ? AND guild_id = ? AND time > ?
+            // 场景：生成发送者在某群的今日词云、查看个人在某群的排名/发言数
+            // SQL: WHERE guild_id = ? AND user_id = ? AND time > ?
             sea_orm::sea_query::Index::create()
-                .name("idx_records_user_guild_time")
+                .name("idx_records_guild_user_time")
                 .table(RecordEntity)
-                .col(entity::Column::UserId)
                 .col(entity::Column::GuildId)
+                .col(entity::Column::UserId)
                 .col(entity::Column::Time)
                 .if_not_exists()
                 .to_owned(),
-            // 场景：全平台趋势分析、数据清理
-            // 查询条件通常是：WHERE time > ?
+            // 场景：跨群查看发送者的个人专属词云、全局活跃统计
+            // SQL: WHERE user_id = ? AND time > ?
+            sea_orm::sea_query::Index::create()
+                .name("idx_records_user_time")
+                .table(RecordEntity)
+                .col(entity::Column::UserId)
+                .col(entity::Column::Time)
+                .if_not_exists()
+                .to_owned(),
+            // 场景：全平台数据清理、宏观趋势
+            // SQL: WHERE time > ?
             sea_orm::sea_query::Index::create()
                 .name("idx_records_time")
                 .table(RecordEntity)

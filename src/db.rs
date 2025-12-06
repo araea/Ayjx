@@ -1,8 +1,12 @@
+#![allow(dead_code)]
+
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 use std::path::Path;
 use tokio::fs;
 
 use crate::info;
+
+pub mod queries;
 
 /// 初始化数据库连接
 pub async fn init() -> Result<DatabaseConnection, DbErr> {

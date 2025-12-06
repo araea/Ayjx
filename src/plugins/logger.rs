@@ -42,17 +42,24 @@ pub fn handle(
 
                 if let Some(msg) = ctx.as_message() {
                     let content = format_message(ev.get("message"));
+                    // 尝试获取群名 (部分 OneBot 实现或扩展字段，同 recorder 插件逻辑)
+                    let group_name = ev.get_str("group_name");
                     let sender = format!("{}({})", msg.sender_name(), msg.user_id());
 
                     if let Some(gid) = msg.group_id() {
-                        // 格式: 接收 <- 群聊 [Group(ID)] [Sender(ID)] Content
+                        let group_str = if let Some(name) = group_name {
+                            format!("{}|{}", name, gid)
+                        } else {
+                            gid.to_string()
+                        };
+                        // 格式: 接收 <- 群聊 [Group(Name|ID)] [Sender(Name(ID))] Content
                         info!(
                             target: "Chat",
                             "接收 <- 群聊 [Group({})] [{}] {}",
-                            gid, sender, content
+                            group_str, sender, content
                         );
                     } else {
-                        // 格式: 接收 <- 私聊 [Sender(ID)] Content
+                        // 格式: 接收 <- 私聊 [Sender(Name(ID))] Content
                         info!(
                             target: "Chat",
                             "接收 <- 私聊 [{}] {}",
@@ -80,10 +87,27 @@ pub fn handle(
                             .get_i64("group_id")
                             .or_else(|| params.get_u64("group_id").map(|v| v as i64))
                             .unwrap_or(0);
+
+                        // 尝试从原始事件中获取上下文信息 (如群名)
+                        let mut group_info = gid.to_string();
+                        if let Some(origin) = &packet.original_event {
+                            let origin_gid = origin
+                                .get_i64("group_id")
+                                .or_else(|| origin.get_u64("group_id").map(|v| v as i64))
+                                .unwrap_or(0);
+
+                            // 如果发送的目标群与原始事件的群一致，则复用群名
+                            if origin_gid == gid {
+                                if let Some(name) = origin.get_str("group_name") {
+                                    group_info = format!("{}|{}", name, gid);
+                                }
+                            }
+                        }
+
                         info!(
                             target: "Chat",
                             "发送 -> 群聊 [Group({})] {}",
-                            gid, content
+                            group_info, content
                         );
                     } else if msg_type == "private" {
                         let uid = params
@@ -152,12 +176,37 @@ fn format_message(msg_val: Option<&OwnedValue>) -> String {
                     result.push_str(&format!(" [@{}] ", qq));
                 }
                 "face" => result.push_str(" [表情] "),
-                "image" => result.push_str(" [图片] "),
+                "image" => {
+                    let is_anim = data
+                        .map(|d| {
+                            let summary = d.get_str("summary").unwrap_or("");
+                            let sub_type = d
+                                .get_i64("sub_type")
+                                .or_else(|| d.get_u64("sub_type").map(|v| v as i64))
+                                .unwrap_or(0);
+                            summary == "[动画表情]" || sub_type == 1
+                        })
+                        .unwrap_or(false);
+
+                    if is_anim {
+                        result.push_str(" [动画表情] ");
+                    } else {
+                        result.push_str(" [图片] ");
+                    }
+                }
                 "record" => result.push_str(" [语音] "),
                 "video" => result.push_str(" [视频] "),
+                "music" => result.push_str(" [音乐] "),
                 "reply" => result.push_str(" [回复] "),
+                "forward" | "node" => result.push_str(" [合并转发] "),
                 "json" => result.push_str(" [卡片消息] "),
+                "xml" => result.push_str(" [XML消息] "),
                 "poke" => result.push_str(" [戳一戳] "),
+                "rps" => result.push_str(" [猜拳] "),
+                "dice" => result.push_str(" [骰子] "),
+                "file" => result.push_str(" [文件] "),
+                "share" => result.push_str(" [分享] "),
+                "location" => result.push_str(" [位置] "),
                 other => result.push_str(&format!(" [{}] ", other)),
             }
         }
