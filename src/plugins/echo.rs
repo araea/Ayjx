@@ -1,4 +1,4 @@
-use crate::bot::{LockedWriter, send_msg};
+use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -22,7 +22,6 @@ pub fn handle(
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
         if let Some(cmd) = match_command(&ctx, "echo") {
-            // 如果没有参数，不做处理（或者可以返回帮助信息）
             if cmd.args.is_empty() {
                 return Ok(Some(ctx));
             }

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use crate::bot::{LockedWriter, send_frame_raw};
+// 引用重构后的 OneBot 适配器逻辑
+use crate::adapters::onebot::{LockedWriter, send_frame_raw};
 use crate::event::{Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;

@@ -10,7 +10,7 @@ pub struct AppConfig {
     pub command_prefix: Vec<String>,
 
     // Bot 连接配置
-    #[serde(default)]
+    #[serde(default = "default_bots")]
     pub bots: Vec<BotConfig>,
 
     // 插件配置
@@ -30,20 +30,55 @@ fn default_prefix() -> Vec<String> {
     vec!["/".to_string()]
 }
 
+fn default_bots() -> Vec<BotConfig> {
+    vec![
+        // 控制台适配器：保持简洁，仅需启用
+        BotConfig {
+            enabled: true,
+            protocol: "console".to_string(),
+            url: None,
+            access_token: None,
+        },
+        // OneBot 适配器：生成配置占位符，默认禁用以防误连
+        BotConfig {
+            enabled: false,
+            protocol: "onebot".to_string(),
+            url: Some("ws://127.0.0.1:3001".to_string()),
+            access_token: Some("YOUR_TOKEN_HERE".to_string()),
+        },
+    ]
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BotConfig {
-    pub url: String,
-    pub access_token: String,
+    // 是否启用此 Bot
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    // 协议类型 (例如 "onebot")
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_protocol() -> String {
+    "onebot".to_string()
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            command_prefix: vec!["/".to_string()],
-            bots: vec![BotConfig {
-                url: "ws://127.0.0.1:3001".to_string(),
-                access_token: "".to_string(),
-            }],
+            command_prefix: default_prefix(),
+            bots: default_bots(),
             plugins: HashMap::new(),
         }
     }

@@ -1,4 +1,4 @@
-use crate::bot::{LockedWriter, send_msg};
+use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};

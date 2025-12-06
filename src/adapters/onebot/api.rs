@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use crate::bot::{LockedWriter, send_frame_raw};
+// 引用同模块下的工具函数
+use super::{LockedWriter, send_frame_raw};
 use crate::event::Context;
 use crate::message::Message;
 use serde::{Deserialize, Serialize};

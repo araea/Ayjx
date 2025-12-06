@@ -1,5 +1,4 @@
-mod api;
-mod bot;
+mod adapters;
 mod command;
 mod config;
 mod db;
@@ -79,10 +78,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 启动 Bots
     let mut active_bots = 0;
     for bot_conf in app_config.bots {
-        if bot_conf.access_token.trim().is_empty() {
-            warn!("Bot [{}] Token 为空，跳过。", bot_conf.url);
+        // 1. 检查是否启用
+        if !bot_conf.enabled {
+            if bot_conf.protocol == "onebot" {
+                info!(
+                    "Bot (OneBot) 已禁用。若需启用请在配置文件中设置 enabled = true 并填写 access_token。"
+                );
+            }
             continue;
         }
+
+        // 针对 OneBot 的特殊检查
+        if bot_conf.protocol == "onebot" {
+            let url = match &bot_conf.url {
+                Some(u) if !u.is_empty() => u,
+                _ => {
+                    error!("Bot 配置错误: OneBot 协议必须指定 url");
+                    continue;
+                }
+            };
+
+            let token = bot_conf.access_token.as_deref().unwrap_or("");
+            // 检查 Token 是否为空或占位符
+            if token.trim().is_empty() || token == "YOUR_TOKEN_HERE" {
+                warn!("Bot [{}] 未配置有效的 access_token，跳过连接。", url);
+                continue;
+            }
+        }
+
+        let adapter = if let Some(a) = adapters::find_adapter(&bot_conf.protocol) {
+            a
+        } else {
+            error!("Bot 配置了未知的协议 '{}'，跳过。", bot_conf.protocol);
+            continue;
+        };
 
         active_bots += 1;
         let bot_shared_cfg = shared_config.clone();
@@ -90,9 +119,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let bot_save_lock = save_lock.clone();
         let bot_config_path = config_path.to_string();
         let bot_db = db.clone();
+        let handler = adapter.handler;
+        let protocol_name = bot_conf.protocol.clone();
+
+        let bot_url = bot_conf
+            .url
+            .clone()
+            .unwrap_or_else(|| "Internal".to_string());
 
         tokio::spawn(async move {
-            bot::run_bot_loop(
+            info!("启动适配器 [{}] -> {}", protocol_name, bot_url);
+            handler(
                 bot_conf,
                 bot_shared_cfg,
                 bot_db,

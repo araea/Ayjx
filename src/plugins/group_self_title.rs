@@ -1,5 +1,5 @@
-use crate::api;
-use crate::bot::LockedWriter;
+use crate::adapters::onebot::LockedWriter;
+use crate::adapters::onebot::api;
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::{Context, EventType};

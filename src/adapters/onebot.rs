@@ -3,25 +3,26 @@ use crate::event::{Context, Event, EventType, SendPacket};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
 use crate::{error, info, plugins, warn};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::future::BoxFuture;
+use futures_util::{Sink, SinkExt, StreamExt};
 use http::HeaderValue;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
+    connect_async,
     tungstenite::{client::IntoClientRequest, protocol::Message as WsMessage},
 };
 
+pub mod api;
+
 pub type BotError = Box<dyn std::error::Error + Send + Sync>;
 
-pub type WsWriter =
-    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>;
-
-pub type LockedWriter = Arc<AsyncMutex<WsWriter>>;
+pub type TraitSink =
+    Box<dyn Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin>;
+pub type LockedWriter = Arc<AsyncMutex<TraitSink>>;
 
 #[derive(Serialize)]
 struct SendParamsInner<T> {
@@ -33,6 +34,29 @@ struct SendParamsInner<T> {
     message: T,
 }
 
+/// 适配器入口函数 (Adapter Entry)
+pub fn entry(
+    bot_config: BotConfig,
+    global_config: Arc<RwLock<AppConfig>>,
+    db: DatabaseConnection,
+    scheduler: Arc<Scheduler>,
+    save_lock: Arc<AsyncMutex<()>>,
+    config_path: String,
+) -> BoxFuture<'static, ()> {
+    Box::pin(async move {
+        run_bot_loop(
+            bot_config,
+            global_config,
+            db,
+            scheduler,
+            save_lock,
+            config_path,
+        )
+        .await
+    })
+}
+
+/// OneBot 协议的主循环逻辑
 pub async fn run_bot_loop(
     bot_config: BotConfig,
     global_config: Arc<RwLock<AppConfig>>,
@@ -41,6 +65,10 @@ pub async fn run_bot_loop(
     save_lock: Arc<AsyncMutex<()>>,
     config_path: String,
 ) {
+    let bot_url = bot_config
+        .url
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
     loop {
         match connect_and_listen(
             &bot_config,
@@ -52,9 +80,9 @@ pub async fn run_bot_loop(
         )
         .await
         {
-            Ok(()) => warn!(target: "Bot", "Bot [{}] 连接断开，3秒后重连...", bot_config.url),
+            Ok(()) => warn!(target: "Bot", "Bot [{}] 连接断开，3秒后重连...", bot_url),
             Err(e) => {
-                error!(target: "Bot", "Bot [{}] 连接失败: {}。3秒后重试...", bot_config.url, e)
+                error!(target: "Bot", "Bot [{}] 连接失败: {}。3秒后重试...", bot_url, e)
             }
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -69,19 +97,29 @@ async fn connect_and_listen(
     save_lock: Arc<AsyncMutex<()>>,
     config_path: String,
 ) -> Result<(), BotError> {
-    let mut request = config.url.as_str().into_client_request()?;
-    let token_header = format!("Bearer {}", config.access_token);
-    request
-        .headers_mut()
-        .insert("Authorization", HeaderValue::from_str(&token_header)?);
+    let url = config
+        .url
+        .as_deref()
+        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from("OneBot URL 未配置"))?;
+
+    let mut request = url.into_client_request()?;
+
+    if let Some(token) = &config.access_token {
+        if !token.is_empty() {
+            let token_header = format!("Bearer {}", token);
+            request
+                .headers_mut()
+                .insert("Authorization", HeaderValue::from_str(&token_header)?);
+        }
+    }
 
     let (ws_stream, _) = connect_async(request).await?;
-    info!(target: "Bot", "Bot [{}] 连接成功！", config.url);
+    info!(target: "Bot", "Bot [{}] 连接成功！(OneBot)", url);
 
     let (write_half, mut read_half) = ws_stream.split();
-    let writer = Arc::new(AsyncMutex::new(write_half));
 
-    // 每个连接初始化一个 Matcher，用于处理该 Bot 的交互式等待
+    let writer: LockedWriter = Arc::new(AsyncMutex::new(Box::new(write_half)));
+
     let matcher = Arc::new(Matcher::new());
 
     while let Some(message) = read_half.next().await {
@@ -89,7 +127,6 @@ async fn connect_and_listen(
             Ok(WsMessage::Text(text)) => {
                 let mut data = text.as_bytes().to_vec();
 
-                // 克隆资源以移动到新任务中
                 let writer = writer.clone();
                 let config = global_config.clone();
                 let db = db.clone();
@@ -124,7 +161,7 @@ async fn connect_and_listen(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_frame(
+pub async fn process_frame(
     data: &mut [u8],
     writer: LockedWriter,
     config: Arc<RwLock<AppConfig>>,
