@@ -19,6 +19,7 @@ pub mod ping_pong;
 pub mod recall;
 pub mod recorder;
 pub mod repeater;
+pub mod word_cloud;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -87,6 +88,12 @@ pub fn get_plugins() -> &'static [Plugin] {
                 handler: repeater::handle,
                 on_init: None,
                 default_config: repeater::default_config,
+            },
+            Plugin {
+                name: "word_cloud",
+                handler: word_cloud::handle,
+                on_init: None,
+                default_config: word_cloud::default_config,
             },
         ]
     })

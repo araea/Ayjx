@@ -44,8 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match app_config.plugins.get_mut(plugin.name) {
             Some(existing_config) => {
                 // 如果配置已存在，尝试合并默认配置中的新字段
-                if let toml::Value::Table(existing_table) = existing_config {
-                    if let toml::Value::Table(default_table) = default_config {
+                if let toml::Value::Table(existing_table) = existing_config
+                    && let toml::Value::Table(default_table) = default_config {
                         for (key, value) in default_table {
                             if !existing_table.contains_key(&key) {
                                 info!("插件 [{}] 配置补全: 新增字段 '{}'", plugin.name, key);
@@ -54,7 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
                     }
-                }
             }
             None => {
                 info!("检测到新插件 [{}]，写入默认配置...", plugin.name);

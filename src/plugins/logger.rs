@@ -97,11 +97,10 @@ pub fn handle(
                                 .unwrap_or(0);
 
                             // 如果发送的目标群与原始事件的群一致，则复用群名
-                            if origin_gid == gid {
-                                if let Some(name) = origin.get_str("group_name") {
+                            if origin_gid == gid
+                                && let Some(name) = origin.get_str("group_name") {
                                     group_info = format!("{}|{}", name, gid);
                                 }
-                            }
                         }
 
                         info!(
