@@ -8,7 +8,7 @@ pub enum Level {
 }
 
 /// 统一日志输出函数
-/// 格式: [Time] [LEVEL] [Target      ] Message
+/// 格式: [Time] [LEVEL] [Target] Message
 pub fn print(level: Level, target: &str, args: std::fmt::Arguments) {
     let now = Local::now().format("%H:%M:%S");
 
@@ -26,7 +26,7 @@ pub fn print(level: Level, target: &str, args: std::fmt::Arguments) {
     };
 
     println!(
-        "{}[{}] {}[{}] {} {}{}{} {}",
+        "{}[{}] {}[{}] {}{}{}{} {}",
         gray,
         now,
         color,
