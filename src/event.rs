@@ -29,6 +29,8 @@ pub struct BotStatus {
 }
 
 /// 统一的上下文，包含事件数据、可变配置和任务调度器
+/// 新增 Clone 以便于在闭包和异步任务中传递
+#[derive(Clone)]
 pub struct Context {
     pub event: EventType,
     pub config: Arc<RwLock<AppConfig>>,
@@ -150,7 +152,7 @@ impl<'a> MessageEvent<'a> {
 // ================== 基础结构定义 ==================
 
 /// 事件类型
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EventType {
     /// 来自 OneBot 的原始事件
     Onebot(Event),

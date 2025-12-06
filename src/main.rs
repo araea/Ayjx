@@ -27,12 +27,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = db::init().await.expect("数据库初始化失败");
 
     // 加载或创建基础配置
-    let mut config_content = String::new();
-    if Path::new(config_path).exists() {
-        config_content = fs::read_to_string(config_path).await?;
-    }
-
-    let mut app_config: AppConfig = toml::from_str(&config_content).unwrap_or_default();
+    let mut app_config = if Path::new(config_path).exists() {
+        let content = fs::read_to_string(config_path).await?;
+        match toml::from_str::<AppConfig>(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // 如果文件存在但内容为空，使用默认配置
+                if content.trim().is_empty() {
+                    warn!("配置文件为空，将使用默认配置并重新生成。");
+                    AppConfig::default()
+                } else {
+                    // 如果解析失败（如类型错误），直接报错退出，防止覆盖源文件
+                    error!("配置文件 [{}] 解析失败: {}", config_path, e);
+                    error!(
+                        "请检查配置文件格式是否正确（例如字段类型是否匹配）。程序已停止以保护配置不被覆盖。"
+                    );
+                    // 显式指定错误类型，帮助编译器推断 main 函数的返回类型
+                    let err: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+                    return Err(err);
+                }
+            }
+        }
+    } else {
+        // 文件不存在，使用默认配置
+        AppConfig::default()
+    };
 
     // 动态合并插件默认配置
     let registered_plugins = plugins::get_plugins();
@@ -45,15 +64,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Some(existing_config) => {
                 // 如果配置已存在，尝试合并默认配置中的新字段
                 if let toml::Value::Table(existing_table) = existing_config
-                    && let toml::Value::Table(default_table) = default_config {
-                        for (key, value) in default_table {
-                            if !existing_table.contains_key(&key) {
-                                info!("插件 [{}] 配置补全: 新增字段 '{}'", plugin.name, key);
-                                existing_table.insert(key, value);
-                                config_dirty = true;
-                            }
+                    && let toml::Value::Table(default_table) = default_config
+                {
+                    for (key, value) in default_table {
+                        if !existing_table.contains_key(&key) {
+                            info!("插件 [{}] 配置补全: 新增字段 '{}'", plugin.name, key);
+                            existing_table.insert(key, value);
+                            config_dirty = true;
                         }
                     }
+                }
             }
             None => {
                 info!("检测到新插件 [{}]，写入默认配置...", plugin.name);

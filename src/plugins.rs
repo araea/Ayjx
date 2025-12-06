@@ -32,6 +32,8 @@ pub struct Plugin {
     pub name: &'static str,
     pub handler: PluginHandler,
     pub on_init: Option<PluginInitHandler>,
+    /// 当 Bot 连接成功且获取到自身信息后触发 (用于注册主动推送任务等)
+    pub on_connected: Option<PluginHandler>,
     pub default_config: fn() -> Value,
 }
 
@@ -45,54 +47,63 @@ pub fn get_plugins() -> &'static [Plugin] {
                 name: "filter_meta_event",
                 handler: filter_meta_event::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: filter_meta_event::default_config,
             },
             Plugin {
                 name: "logger",
                 handler: logger::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: logger::default_config,
             },
             Plugin {
                 name: "recorder",
                 handler: recorder::handle,
                 on_init: Some(recorder::init),
+                on_connected: None,
                 default_config: recorder::default_config,
             },
             Plugin {
                 name: "group_self_title",
                 handler: group_self_title::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: group_self_title::default_config,
             },
             Plugin {
                 name: "ping_pong",
                 handler: ping_pong::handle,
                 on_init: Some(ping_pong::init),
+                on_connected: None,
                 default_config: ping_pong::default_config,
             },
             Plugin {
                 name: "recall",
                 handler: recall::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: recall::default_config,
             },
             Plugin {
                 name: "echo",
                 handler: echo::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: echo::default_config,
             },
             Plugin {
                 name: "repeater",
                 handler: repeater::handle,
                 on_init: None,
+                on_connected: None,
                 default_config: repeater::default_config,
             },
             Plugin {
                 name: "word_cloud",
                 handler: word_cloud::handle,
                 on_init: None,
+                on_connected: Some(word_cloud::on_connected),
                 default_config: word_cloud::default_config,
             },
         ]
@@ -157,6 +168,35 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
             }
         } else {
             info!(target: "Plugin", "✅ [{}] 就绪", plugin.name);
+        }
+    }
+    Ok(())
+}
+
+/// 当 Bot 连接建立后触发（用于注册定时任务或主动操作）
+pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
+    let plugins = get_plugins();
+    let enabled_plugins: HashSet<String> = {
+        let guard = ctx.config.read().unwrap();
+        guard
+            .plugins
+            .iter()
+            .filter(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false))
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+
+    for plugin in plugins {
+        if !enabled_plugins.contains(plugin.name) {
+            continue;
+        }
+
+        if let Some(conn_fn) = plugin.on_connected {
+            if let Err(e) = conn_fn(ctx.clone(), writer.clone()).await {
+                error!(target: "Plugin", "❌ [{}] 连接钩子执行失败: {}", plugin.name, e);
+            } else {
+                info!(target: "Plugin", "🔗 [{}] 连接钩子已触发", plugin.name);
+            }
         }
     }
     Ok(())

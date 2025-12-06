@@ -9,6 +9,10 @@ pub struct AppConfig {
     #[serde(default = "default_prefix")]
     pub command_prefix: Vec<String>,
 
+    // 全局频道过滤配置
+    #[serde(default)]
+    pub global_filter: GlobalFilterConfig,
+
     // Bot 连接配置
     #[serde(default = "default_bots")]
     pub bots: Vec<BotConfig>,
@@ -16,6 +20,19 @@ pub struct AppConfig {
     // 插件配置
     #[serde(flatten)]
     pub plugins: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct GlobalFilterConfig {
+    #[serde(default)]
+    pub enable_blacklist: bool,
+    #[serde(default)]
+    pub blacklist: Vec<i64>,
+
+    #[serde(default)]
+    pub enable_whitelist: bool,
+    #[serde(default)]
+    pub whitelist: Vec<i64>,
 }
 
 impl AppConfig {
@@ -78,6 +95,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             command_prefix: default_prefix(),
+            global_filter: GlobalFilterConfig::default(),
             bots: default_bots(),
             plugins: HashMap::new(),
         }

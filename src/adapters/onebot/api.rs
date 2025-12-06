@@ -278,3 +278,35 @@ pub struct LoginInfo {
 pub async fn get_login_info(ctx: &Context, writer: LockedWriter) -> Result<LoginInfo, ApiError> {
     call_action(ctx, writer, "get_login_info", GetLoginInfoParams {}).await
 }
+
+// --- get_group_list ---
+
+#[derive(Serialize)]
+struct GetGroupListParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_cache: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GroupInfo {
+    pub group_id: i64,
+    pub group_name: String,
+    pub member_count: Option<i32>,
+    pub max_member_count: Option<i32>,
+}
+
+pub async fn get_group_list(
+    ctx: &Context,
+    writer: LockedWriter,
+    no_cache: bool,
+) -> Result<Vec<GroupInfo>, ApiError> {
+    call_action(
+        ctx,
+        writer,
+        "get_group_list",
+        GetGroupListParams {
+            no_cache: Some(no_cache),
+        },
+    )
+    .await
+}

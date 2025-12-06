@@ -8,6 +8,8 @@ use futures_util::{Sink, SinkExt, StreamExt};
 use http::HeaderValue;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
+use simd_json::base::ValueAsScalar;
+use simd_json::derived::ValueObjectAccess;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
@@ -158,17 +160,32 @@ async fn connect_and_listen(
                 bot: status_ref.read().unwrap().clone(),
             };
 
-            match api::get_login_info(&ctx, writer_ref).await {
+            match api::get_login_info(&ctx, writer_ref.clone()).await {
                 Ok(info) => {
-                    let mut guard = status_ref.write().unwrap();
-                    guard.login_user.id = info.user_id.to_string();
-                    guard.login_user.name = Some(info.nickname.clone());
-                    guard.login_user.nick = Some(info.nickname);
-                    guard.login_user.avatar = Some(format!(
-                        "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
-                        info.user_id
-                    ));
-                    info!(target: "Bot", "已获取登录信息: {} ({})", guard.login_user.name.as_deref().unwrap_or("Unknown"), guard.login_user.id);
+                    // 更新状态时使用代码块限制锁的生命周期
+                    // 确保 guard 在 await 之前被 drop
+                    let updated_bot_status = {
+                        let mut guard = status_ref.write().unwrap();
+                        guard.login_user.id = info.user_id.to_string();
+                        guard.login_user.name = Some(info.nickname.clone());
+                        guard.login_user.nick = Some(info.nickname);
+                        guard.login_user.avatar = Some(format!(
+                            "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
+                            info.user_id
+                        ));
+                        info!(target: "Bot", "已获取登录信息: {} ({})", guard.login_user.name.as_deref().unwrap_or("Unknown"), guard.login_user.id);
+
+                        guard.clone()
+                    }; // 锁在这里释放
+
+                    // 构造新的 Context 包含更新后的 Bot 信息
+                    let mut new_ctx = ctx;
+                    new_ctx.bot = updated_bot_status;
+
+                    // 触发插件系统的 Connected 钩子
+                    if let Err(e) = plugins::do_connected(new_ctx, writer_ref).await {
+                        error!(target: "Bot", "插件 Connected 钩子执行失败: {}", e);
+                    }
                 }
                 Err(e) => {
                     warn!(target: "Bot", "获取登录信息失败: {}", e);
@@ -242,6 +259,32 @@ pub async fn process_frame(
         Some(e) => e,
         None => return Ok(()),
     };
+
+    // 全局黑白名单过滤
+    // 仅过滤带有 group_id 的事件（即群相关事件）
+    let group_id = event
+        .get("group_id")
+        .and_then(|v| v.as_i64().or(v.as_u64().map(|u| u as i64)));
+
+    if let Some(gid) = group_id {
+        let should_drop = {
+            let guard = config.read().unwrap();
+            let filter = &guard.global_filter;
+            if filter.enable_whitelist {
+                // 开启白名单：仅允许白名单内的频道
+                !filter.whitelist.contains(&gid)
+            } else if filter.enable_blacklist {
+                // 开启黑名单：过滤黑名单内的频道
+                filter.blacklist.contains(&gid)
+            } else {
+                false
+            }
+        };
+
+        if should_drop {
+            return Ok(());
+        }
+    }
 
     let ctx = Context {
         event: EventType::Onebot(event),
