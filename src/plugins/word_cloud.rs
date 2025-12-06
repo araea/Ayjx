@@ -5,20 +5,22 @@ use crate::db::queries::get_text_corpus;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
-use araea_wordcloud::{ColorScheme, WordCloudBuilder, WordInput};
+use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{Datelike, Duration, Local};
 use futures_util::future::BoxFuture;
 use image::{GenericImageView, ImageFormat};
-use jieba_rs::Jieba;
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::OnceLock;
 use std::time::Instant;
 use toml::Value;
+
+mod stopwords;
+use stopwords::get_stop_words;
 
 #[derive(Serialize, Deserialize)]
 struct WordCloudConfig {
@@ -31,267 +33,42 @@ struct WordCloudConfig {
     height: u32,
     #[serde(default)]
     font_path: Option<String>,
+    #[serde(default = "default_max_msg")]
+    max_msg: usize,
 }
 
 fn default_limit() -> usize {
-    200
+    50
 }
 
 fn default_width() -> u32 {
-    1200
+    800
 }
 
 fn default_height() -> u32 {
-    800
+    600
+}
+
+fn default_max_msg() -> usize {
+    50000
 }
 
 pub fn default_config() -> Value {
     build_config(WordCloudConfig {
         enabled: true,
-        limit: 200,
-        width: 1200,
-        height: 800,
+        limit: 50,
+        width: 800,
+        height: 600,
         font_path: None,
+        max_msg: 50000,
     })
 }
 
-static JIEBA: OnceLock<Jieba> = OnceLock::new();
-static STOP_WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
 static COMMAND_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn init_jieba() -> Jieba {
-    Jieba::new()
-}
-
-fn get_stop_words() -> &'static HashSet<&'static str> {
-    STOP_WORDS.get_or_init(|| {
-        let list = vec![
-            // --- 代词 & 称谓 ---
-            "我",
-            "你",
-            "他",
-            "她",
-            "它",
-            "我们",
-            "你们",
-            "他们",
-            "咱们",
-            "大家",
-            "自己",
-            "别人",
-            "人家",
-            "这里",
-            "那里",
-            "哪里",
-            // --- 常见语气词/填充词 ---
-            "这个",
-            "那个",
-            "这种",
-            "那种",
-            "这样",
-            "那样",
-            "有点",
-            "有简",
-            "有些",
-            "有的",
-            "其实",
-            "确实",
-            "就是",
-            "算是",
-            "感觉",
-            "觉得",
-            "认为",
-            "以为",
-            "可能",
-            "大概",
-            "应该",
-            "好像",
-            "似乎",
-            "也许",
-            "然后",
-            "接着",
-            "结果",
-            "后来",
-            "之前",
-            "之后",
-            "反正",
-            "总之",
-            "毕竟",
-            "原来",
-            "根本",
-            "简直",
-            "真是",
-            "真的",
-            "非常",
-            "特别",
-            "相当",
-            "比较",
-            "一般",
-            "一直",
-            "一定",
-            "已经",
-            "依然",
-            "仍然",
-            "只是",
-            "不过",
-            "但是",
-            "可是",
-            "而且",
-            "虽然",
-            "因为",
-            "所以",
-            "如果",
-            "假如",
-            "比如",
-            "例如",
-            "顺便",
-            "马上",
-            "现在",
-            "刚才",
-            "最近",
-            "平时",
-            "意思",
-            "样子",
-            "东西",
-            "事情",
-            "情况",
-            "问题",
-            "一下",
-            "一点",
-            "一些",
-            "一次",
-            "一会儿",
-            "哈哈",
-            "哈哈哈",
-            "呵呵",
-            "嘿嘿",
-            "呜呜",
-            "啧啧",
-            // --- 单字虚词/介词/助词 ---
-            "的",
-            "了",
-            "在",
-            "是",
-            "有",
-            "和",
-            "与",
-            "或",
-            "及",
-            "去",
-            "来",
-            "做",
-            "干",
-            "弄",
-            "搞",
-            "说",
-            "看",
-            "想",
-            "这",
-            "那",
-            "就",
-            "也",
-            "都",
-            "而",
-            "着",
-            "吧",
-            "呢",
-            "啊",
-            "嘛",
-            "呀",
-            "哦",
-            "噢",
-            "嗯",
-            "呗",
-            "啦",
-            "咯",
-            "被",
-            "给",
-            "把",
-            "让",
-            "对",
-            "向",
-            "往",
-            "自",
-            "从",
-            "不",
-            "没",
-            "别",
-            "非",
-            "无",
-            // --- 否定与判断组合 ---
-            "没有",
-            "不是",
-            "不行",
-            "不能",
-            "不会",
-            "不要",
-            "不用",
-            "可以",
-            "能够",
-            "需要",
-            "愿意",
-            "喜欢",
-            "知道",
-            "明白",
-            "出来",
-            "进去",
-            "起来",
-            "下去",
-            "回来",
-            "回去",
-            // --- 特殊标记 ---
-            "[图片]",
-            "[表情]",
-            "[语音]",
-            "[视频]",
-            "[引用]",
-            "truncated",
-            // --- 保留原列表中的其他词 ---
-            "人",
-            "一",
-            "一个",
-            "上",
-            "很",
-            "到",
-            "要",
-            "会",
-            "好",
-            "吗",
-            "哈",
-            "什么",
-            "怎么",
-            "还是",
-            "或者",
-            "http",
-            "https",
-            "com",
-            "cn",
-            "www",
-            "img",
-            "image",
-            "CQ",
-            "cq",
-            "face",
-            "url",
-            "video",
-            "record",
-            "reply",
-            "at",
-            "file",
-            "json",
-            "xml",
-            "今天",
-            "昨天",
-            "明天",
-            "时候",
-        ];
-        list.into_iter().collect()
-    })
-}
 
 fn get_regex() -> &'static Regex {
     COMMAND_REGEX.get_or_init(|| {
-        Regex::new(r"^(本群|跨群|发送者)(今日|昨日|本周|近7天|本月|今年|总)词云$").unwrap()
+        Regex::new(r"^(本群|跨群|我的)(今日|昨日|本周|近7天|本月|今年|总)词云$").unwrap()
     })
 }
 
@@ -302,10 +79,11 @@ pub fn handle(
     Box::pin(async move {
         let config: WordCloudConfig = get_config(&ctx, "word_cloud").unwrap_or(WordCloudConfig {
             enabled: true,
-            limit: 200,
-            width: 1200,
-            height: 800,
+            limit: 50,
+            width: 800,
+            height: 600,
             font_path: None,
+            max_msg: 50000,
         });
 
         let msg = match ctx.as_message() {
@@ -315,17 +93,24 @@ pub fn handle(
         let text = msg.text();
         let trimmed_text = text.trim();
 
-        // 1. 处理指令前缀
         let prefixes = get_prefixes(&ctx);
-        let mut content_to_match = trimmed_text;
+        let mut matched_content = None;
 
-        // 尝试去除配置中的指令前缀
-        for prefix in prefixes {
-            if trimmed_text.starts_with(&prefix) {
-                content_to_match = trimmed_text[prefix.len()..].trim_start();
-                break;
+        if prefixes.is_empty() {
+            matched_content = Some(trimmed_text);
+        } else {
+            for prefix in &prefixes {
+                if trimmed_text.starts_with(prefix) {
+                    matched_content = Some(trimmed_text[prefix.len()..].trim_start());
+                    break;
+                }
             }
         }
+
+        let content_to_match = match matched_content {
+            Some(c) => c,
+            None => return Ok(Some(ctx)),
+        };
 
         let regex = get_regex();
         if let Some(caps) = regex.captures(content_to_match) {
@@ -366,7 +151,7 @@ pub fn handle(
             )
             .await;
 
-            let corpus = match corpus_result {
+            let mut corpus = match corpus_result {
                 Ok(c) if c.is_empty() => {
                     let reply = Message::new().text(format!(
                         "生成失败：{} 在 {} 范围内没有足够的消息记录。",
@@ -381,6 +166,11 @@ pub fn handle(
                     return Ok(None);
                 }
             };
+
+            if config.max_msg > 0 && corpus.len() > config.max_msg {
+                let start = corpus.len().saturating_sub(config.max_msg);
+                corpus = corpus.split_off(start);
+            }
 
             let _reply_prefix = format!(
                 "正在生成 {} 的 {} 词云，样本数: {}...",
@@ -430,7 +220,6 @@ pub fn handle(
 
 // === 辅助逻辑 ===
 
-/// 计算时间戳范围 (start, end)
 fn get_time_range(time_str: &str) -> (i64, i64) {
     let now = Local::now();
     let today_start = now
@@ -484,23 +273,20 @@ fn get_time_range(time_str: &str) -> (i64, i64) {
     }
 }
 
-/// 生成词云图片，自动裁剪并返回 Base64 URI
 fn generate_word_cloud(
     corpus: Vec<String>,
-    _font_path: Option<String>,
+    font_path: Option<String>,
     limit: usize,
     width: u32,
     height: u32,
 ) -> Result<String, String> {
     let start = Instant::now();
 
-    // 1. 分词与统计
-    let jieba = JIEBA.get_or_init(init_jieba);
     let stop_words = get_stop_words();
     let mut freq_map: HashMap<String, f64> = HashMap::new();
 
     for line in corpus {
-        let words = jieba.cut(&line, false);
+        let words = line.split_whitespace();
         for w in words {
             let w_trim = w.trim();
             // 过滤规则：长度>1，不在停用词表，非纯数字
@@ -519,7 +305,6 @@ fn generate_word_cloud(
         return Err("有效词汇为空（可能被过滤）".to_string());
     }
 
-    // 2. 排序并截取 Top N
     let mut word_vec: Vec<(String, f64)> = freq_map.into_iter().collect();
     word_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -529,33 +314,31 @@ fn generate_word_cloud(
         .map(|(text, size)| WordInput::new(text, size as f32))
         .collect();
 
-    // 3. 构建词云
     let mut rng = rand::rng();
-    let builder = WordCloudBuilder::new()
+    let mut builder = WordCloudBuilder::new()
         .size(width, height)
-        .color_scheme(ColorScheme::Ocean)
-        .background("#FFFFFF") // 使用白色背景以便于裁剪
-        .padding(2)
-        .word_spacing(3.0)
-        .angles(vec![0.0])
-        .font_size_range(20.0, 150.0)
         .seed(rng.random());
 
-    // if let Some(path) = font_path {
-    //     builder = builder.font(&path);
-    // }
+    if let Some(path) = font_path {
+        match std::fs::read(&path) {
+            Ok(font_data) => {
+                builder = builder.font(font_data);
+            }
+            Err(e) => {
+                return Err(format!("加载字体文件失败: {} - {}", path, e));
+            }
+        }
+    }
 
     let wordcloud = builder
         .build(&top_words)
         .map_err(|e| format!("Build Error: {}", e))?;
 
-    // 4. 获取原始 PNG 数据
     let png_data = wordcloud
-        .to_png(1.0)
+        .to_png(2.0)
         .map_err(|e| format!("PNG Encode Error: {}", e))?;
 
-    // 5. 自动裁剪 (Auto Crop)
-    // 加载图片
+    // 自动裁剪
     let img = image::load_from_memory(&png_data).map_err(|e| format!("Image Load Error: {}", e))?;
 
     let (img_w, img_h) = img.dimensions();
@@ -570,7 +353,6 @@ fn generate_word_cloud(
         for x in 0..img_w {
             let pixel = img.get_pixel(x, y);
             // 假设背景纯白 (255, 255, 255)，允许少量误差
-            // pixel[0]=R, pixel[1]=G, pixel[2]=B
             if pixel[0] < 250 || pixel[1] < 250 || pixel[2] < 250 {
                 if x < min_x {
                     min_x = x;
@@ -590,7 +372,6 @@ fn generate_word_cloud(
     }
 
     let final_data = if found_content {
-        // 添加适量 padding
         let padding = 20;
         let crop_min_x = min_x.saturating_sub(padding);
         let crop_min_y = min_y.saturating_sub(padding);
@@ -600,25 +381,20 @@ fn generate_word_cloud(
         let crop_width = crop_max_x - crop_min_x + 1;
         let crop_height = crop_max_y - crop_min_y + 1;
 
-        // 执行裁剪
         let cropped_img = img.crop_imm(crop_min_x, crop_min_y, crop_width, crop_height);
 
-        // 重新编码为 PNG
         let mut buffer = Cursor::new(Vec::new());
         cropped_img
             .write_to(&mut buffer, ImageFormat::Png)
             .map_err(|e| format!("Image Write Error: {}", e))?;
         buffer.into_inner()
     } else {
-        // 未发现内容（全白），返回原图
         png_data
     };
 
-    // 6. Base64 编码
     let b64_str = general_purpose::STANDARD.encode(&final_data);
 
     info!(target: "Plugin/WordCloud", "Generated & Cropped in {:?}", start.elapsed());
 
-    // 7. 返回 Base64 URI
     Ok(format!("base64://{}", b64_str))
 }

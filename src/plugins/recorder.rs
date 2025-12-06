@@ -4,11 +4,13 @@ use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use futures_util::future::BoxFuture;
-use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, Schema, Set};
+use jieba_rs::Jieba;
+use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, Schema, Set, Statement};
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsScalar};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
+use std::sync::OnceLock;
 use toml::Value;
 
 pub mod entity {
@@ -36,7 +38,8 @@ pub mod entity {
 
         pub content_raw: String,  // CQ or Raw
         pub content_rich: String, // 富文本摘要
-        pub content_text: String, // 纯文本内容，用于分词分析
+        pub content_text: String, // 纯文本内容
+        pub tokens: String,       // 分词结果（空格分隔）
         pub raw_message_json: String,
 
         pub role: String,
@@ -78,6 +81,13 @@ pub mod entity {
 use entity::ActiveModel as RecordActiveModel;
 use entity::Entity as RecordEntity;
 
+// 全局 Jieba 实例
+static JIEBA: OnceLock<Jieba> = OnceLock::new();
+
+fn get_jieba() -> &'static Jieba {
+    JIEBA.get_or_init(Jieba::new)
+}
+
 #[derive(Serialize, Deserialize)]
 struct RecorderConfig {
     enabled: bool,
@@ -110,6 +120,11 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         db.execute(stmt)
             .await
             .map_err(|e| format!("Recorder Plugin DB Init Error: {}", e))?;
+
+        let alter_sql = "ALTER TABLE message_records ADD COLUMN tokens TEXT NOT NULL DEFAULT ''";
+        let _ = db
+            .execute(Statement::from_string(builder, alter_sql.to_owned()))
+            .await;
 
         // 2. 创建索引 (为了应对高频分析查询)
         // 索引定义：(列名...)
@@ -154,7 +169,6 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         for idx in indexes {
             let stmt = builder.build(&idx);
-            // 索引创建失败不应阻断启动（可能是重复创建等问题）
             if let Err(e) = db.execute(stmt).await {
                 warn!(target: "Plugin/Recorder", "Index creation warning: {}", e);
             }
@@ -176,8 +190,8 @@ pub fn handle(
 
         let mut record = RecordActiveModel {
             platform: Set("qq".to_string()),
-            // 初始化新增字段
             content_text: Set("".to_string()),
+            tokens: Set("".to_string()),
             ..Default::default()
         };
 
@@ -410,7 +424,6 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
                         if let Some(t) = data.and_then(|d| d.get_str("text")) {
                             rich_text.push_str(t);
                             plain_text_acc.push_str(t);
-                            // 将文本段存入 vec，后续用空格拼接
                             let trimmed = t.trim();
                             if !trimmed.is_empty() {
                                 text_segments.push(trimmed.to_string());
@@ -490,8 +503,18 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
     }
 
     record.content_rich = Set(rich_text);
-    // 将所有文本段用空格拼接，存入 content_text
-    record.content_text = Set(text_segments.join(" "));
+
+    // 拼接纯文本并进行分词
+    let joined_text = text_segments.join(" ");
+    record.content_text = Set(joined_text.clone());
+
+    if !joined_text.is_empty() {
+        let jieba = get_jieba();
+        let tokens = jieba.cut(&joined_text, false);
+        record.tokens = Set(tokens.join(" "));
+    } else {
+        record.tokens = Set("".to_string());
+    }
 
     let is_raw_empty = match &record.content_raw {
         ActiveValue::Set(s) | ActiveValue::Unchanged(s) => s.is_empty(),

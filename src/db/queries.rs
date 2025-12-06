@@ -78,7 +78,7 @@ pub async fn get_text_corpus(
 ) -> Result<Vec<String>, DbErr> {
     let mut query = MessageLogs::find()
         .select_only()
-        .column(entity::Column::ContentText)
+        .column_as(entity::Column::Tokens, "content_text")
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time))
         // 过滤掉空文本
@@ -91,7 +91,8 @@ pub async fn get_text_corpus(
         query = query.filter(entity::Column::UserId.eq(uid));
     }
 
-    let results: Vec<TextData> = query.into_model().all(db).await?;
+    // 限制最大返回条数，防止数据量过大导致卡死
+    let results: Vec<TextData> = query.limit(50000).into_model().all(db).await?;
     Ok(results.into_iter().map(|d| d.content_text).collect())
 }
 
