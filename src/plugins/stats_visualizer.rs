@@ -25,13 +25,12 @@ pub struct StatsConfig {
     #[serde(default = "default_height")]
     pub height: u32,
 
-    // === 每日推送 ===
     #[serde(default)]
     pub daily_push_enabled: bool,
     #[serde(default = "default_daily_push_time")]
-    pub daily_push_time: String, // "HH:MM:SS"
+    pub daily_push_time: String,
     #[serde(default)]
-    pub daily_push_scope: String, // "本群" (默认，推送到各自群)
+    pub daily_push_scope: String,
 }
 
 fn default_font_path() -> Option<String> {
@@ -116,7 +115,6 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        // 匹配并提取参数
         let (scope, time_str, data_type, chart_type, is_all_groups) =
             if let Some(caps) = get_regex_global().captures(content) {
                 let t = caps.get(1).map_or("", |m| m.as_str());
@@ -133,7 +131,6 @@ pub fn handle(
                 return Ok(Some(ctx));
             };
 
-        // 校验 Context
         let group_id = msg.group_id();
         let user_id = msg.user_id();
 
@@ -157,8 +154,8 @@ pub fn handle(
 
         let (start_time, end_time) = get_time_range(time_str);
 
-        let (query_guild, query_user) = match scope {
-            "本群" => (group_id.map(|g| g.to_string()), None),
+        let (query_group, query_user) = match scope {
+            "本群" => (group_id, None),
             "跨群" => (None, None),
             "我的" => (None, Some(user_id)),
             _ => (None, None),
@@ -173,11 +170,11 @@ pub fn handle(
         let result_img = chart::generate(
             &ctx,
             is_all_groups,
-            scope,
             data_type,
             chart_type,
-            query_guild.as_deref(),
+            query_group,
             query_user,
+            user_id,
             start_time,
             end_time,
             &title,
@@ -186,7 +183,6 @@ pub fn handle(
 
         match result_img {
             Ok(b64) => {
-                // 仅发送图片，不带文字标题，防止变成缩略图
                 let reply = Message::new().image(b64);
                 let _ = send_msg(&ctx, writer, group_id, Some(user_id), reply).await;
             }
@@ -206,7 +202,6 @@ pub fn handle(
     })
 }
 
-/// 每日推送钩子
 pub fn on_connected(
     ctx: Context,
     writer: LockedWriter,
@@ -233,11 +228,11 @@ pub fn on_connected(
                 let res = chart::generate(
                     &c,
                     false,
-                    "本群",
                     "发言",
                     "排行榜",
-                    Some(&gid.to_string()),
+                    Some(gid),
                     None,
+                    0,
                     start,
                     end,
                     &title,

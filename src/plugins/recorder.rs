@@ -2,7 +2,8 @@ use crate::adapters::onebot::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
-use chrono::{Datelike, Local, TimeZone, Timelike};
+use crate::{error, info, warn};
+use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use futures_util::future::BoxFuture;
 use jieba_rs::Jieba;
 use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, Schema, Set, Statement};
@@ -23,24 +24,17 @@ pub mod entity {
         pub id: i32,
         pub platform: String,
 
-        pub guild_id: String,
-        pub guild_name: String,
-        pub channel_id: String,
-        pub channel_name: String,
+        pub group_id: i64,
+        pub group_name: String,
 
         pub user_id: i64,
         pub user_name: String,   // 对应 nickname (用户本名)
         pub sender_nick: String, // 对应 card (群名片)
 
         pub message_type: String,
-        pub sub_type: String,
-        pub message_id: i64,
 
-        pub content_raw: String,  // CQ or Raw
         pub content_rich: String, // 富文本摘要
-        pub content_text: String, // 纯文本内容
         pub tokens: String,       // 分词结果（空格分隔）
-        pub raw_message_json: String,
 
         pub role: String,
         pub is_reply: bool,
@@ -56,7 +50,7 @@ pub mod entity {
         pub has_at: bool,  // 是否包含At
         pub at_count: i32, // At数量
 
-        pub face_count: i32, // 小表情(face/emoji)数量
+        pub face_count: i32, // 小表情(face)数量
 
         pub is_voice: bool, // 是否是语音
         pub is_video: bool, // 是否是视频
@@ -67,9 +61,6 @@ pub mod entity {
         pub is_poke: bool, // 是否是戳一戳
 
         pub is_forward: bool, // 是否是合并转发
-
-        #[sea_orm(default_expr = "Expr::current_timestamp()")]
-        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -93,16 +84,24 @@ struct RecorderConfig {
     enabled: bool,
     #[serde(default = "default_true")]
     record_self: bool,
+    // 数据保留天数，默认 180 天
+    #[serde(default = "default_retention_days")]
+    retention_days: i64,
 }
 
 fn default_true() -> bool {
     true
 }
 
+fn default_retention_days() -> i64 {
+    180
+}
+
 pub fn default_config() -> Value {
     build_config(RecorderConfig {
         enabled: true,
         record_self: true,
+        retention_days: 180,
     })
 }
 
@@ -117,39 +116,27 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         create_table_stmt.if_not_exists();
 
         let stmt = builder.build(&create_table_stmt);
-        db.execute(stmt)
-            .await
-            .map_err(|e| format!("Recorder Plugin DB Init Error: {}", e))?;
+        if let Err(e) = db.execute(stmt).await {
+            warn!(target: "Plugin/Recorder", "Init table error (ignore if exists): {}", e);
+        }
 
-        let alter_sql = "ALTER TABLE message_records ADD COLUMN tokens TEXT NOT NULL DEFAULT ''";
-        let _ = db
-            .execute(Statement::from_string(builder, alter_sql.to_owned()))
-            .await;
-
-        // 2. 创建索引 (为了应对高频分析查询)
-        // 索引定义：(列名...)
+        // 2. 创建索引
         let indexes = vec![
-            // 场景：生成今日群聊词云、回顾昨日话题、周榜、月榜、消息量走势、活跃时段分布
-            // SQL: WHERE guild_id = ? AND time > ?
             sea_orm::sea_query::Index::create()
-                .name("idx_records_guild_time")
+                .name("idx_records_group_time")
                 .table(RecordEntity)
-                .col(entity::Column::GuildId)
+                .col(entity::Column::GroupId)
                 .col(entity::Column::Time)
                 .if_not_exists()
                 .to_owned(),
-            // 场景：生成发送者在某群的今日词云、查看个人在某群的排名/发言数
-            // SQL: WHERE guild_id = ? AND user_id = ? AND time > ?
             sea_orm::sea_query::Index::create()
-                .name("idx_records_guild_user_time")
+                .name("idx_records_group_user_time")
                 .table(RecordEntity)
-                .col(entity::Column::GuildId)
+                .col(entity::Column::GroupId)
                 .col(entity::Column::UserId)
                 .col(entity::Column::Time)
                 .if_not_exists()
                 .to_owned(),
-            // 场景：跨群查看发送者的个人专属词云、全局活跃统计
-            // SQL: WHERE user_id = ? AND time > ?
             sea_orm::sea_query::Index::create()
                 .name("idx_records_user_time")
                 .table(RecordEntity)
@@ -157,8 +144,6 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 .col(entity::Column::Time)
                 .if_not_exists()
                 .to_owned(),
-            // 场景：全平台数据清理、宏观趋势
-            // SQL: WHERE time > ?
             sea_orm::sea_query::Index::create()
                 .name("idx_records_time")
                 .table(RecordEntity)
@@ -169,10 +154,59 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         for idx in indexes {
             let stmt = builder.build(&idx);
-            if let Err(e) = db.execute(stmt).await {
-                warn!(target: "Plugin/Recorder", "Index creation warning: {}", e);
-            }
+            let _ = db.execute(stmt).await;
         }
+
+        // 3. 注册每日数据清理任务
+        let scheduler = ctx.scheduler.clone();
+        let db_clone = ctx.db.clone();
+        let config_clone = ctx.config.clone();
+
+        scheduler.add_daily_at(4, 0, 0, move || {
+            let db = db_clone.clone();
+            let cfg = config_clone.clone();
+            async move {
+                let retention_days = {
+                    let guard = cfg.read().unwrap();
+                    if let Some(v) = guard.plugins.get("recorder") {
+                        v.get("retention_days").and_then(|x| x.as_integer()).unwrap_or(180)
+                    } else {
+                        180
+                    }
+                };
+
+                if retention_days <= 0 {
+                    info!(target: "Plugin/Recorder", "数据保留天数设置为 0 或负数，跳过清理。");
+                    return;
+                }
+
+                let cutoff_time = Local::now() - Duration::days(retention_days);
+                let timestamp = cutoff_time.timestamp();
+
+                info!(target: "Plugin/Recorder", "开始清理 {} 天前的数据 (Time < {})...", retention_days, timestamp);
+
+                let delete_sql = format!("DELETE FROM message_records WHERE time < {}", timestamp);
+                let res = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, delete_sql)).await;
+
+                match res {
+                    Ok(exec_res) => {
+                        let rows = exec_res.rows_affected();
+                        info!(target: "Plugin/Recorder", "已清理 {} 条过期消息记录。", rows);
+                        if rows > 0 {
+                            info!(target: "Plugin/Recorder", "正在整理数据库碎片 (VACUUM)...");
+                            if let Err(e) = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "VACUUM;".to_owned())).await {
+                                warn!(target: "Plugin/Recorder", "VACUUM 执行失败: {}", e);
+                            } else {
+                                info!(target: "Plugin/Recorder", "数据库整理完成。");
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!(target: "Plugin/Recorder", "清理数据失败: {}", e);
+                    }
+                }
+            }
+        });
 
         Ok(())
     })
@@ -186,11 +220,11 @@ pub fn handle(
         let config: RecorderConfig = get_config(&ctx, "recorder").unwrap_or(RecorderConfig {
             enabled: true,
             record_self: true,
+            retention_days: 180,
         });
 
         let mut record = RecordActiveModel {
             platform: Set("qq".to_string()),
-            content_text: Set("".to_string()),
             tokens: Set("".to_string()),
             ..Default::default()
         };
@@ -213,30 +247,16 @@ pub fn handle(
                     .unwrap_or(0));
                 record.message_type =
                     Set(ev.get_str("message_type").unwrap_or("unknown").to_string());
-                record.sub_type = Set(ev.get_str("sub_type").unwrap_or("normal").to_string());
-                record.message_id = Set(ev
-                    .get_i64("message_id")
-                    .or_else(|| ev.get_u64("message_id").map(|v| v as i64))
-                    .unwrap_or(0));
 
-                // 2. 群组/频道映射 (Group -> Guild/Channel)
+                // 2. 群组信息 (Group)
                 let group_id = ev
                     .get_i64("group_id")
                     .or_else(|| ev.get_u64("group_id").map(|v| v as i64))
                     .unwrap_or(0);
                 let group_name = ev.get_str("group_name").unwrap_or("");
 
-                if group_id != 0 {
-                    record.guild_id = Set(group_id.to_string());
-                    record.channel_id = Set(group_id.to_string());
-                    record.guild_name = Set(group_name.to_string());
-                    record.channel_name = Set(group_name.to_string());
-                } else {
-                    record.guild_id = Set("".to_string());
-                    record.channel_id = Set("".to_string());
-                    record.guild_name = Set("".to_string());
-                    record.channel_name = Set("".to_string());
-                }
+                record.group_id = Set(group_id);
+                record.group_name = Set(group_name.to_string());
 
                 // 3. 用户信息
                 record.user_id = Set(ev
@@ -259,17 +279,8 @@ pub fn handle(
                 }
 
                 // 4. 消息内容
-                record.content_raw = Set(ev.get_str("raw_message_json").unwrap_or("").to_string());
-
                 let msg_val = ev.get("message");
-                let raw_json = if let Some(v) = msg_val {
-                    simd_json::to_string(v).unwrap_or_else(|_| "null".to_string())
-                } else {
-                    "null".to_string()
-                };
-                record.raw_message_json = Set(raw_json);
-
-                // 解析富文本，并获取纯文本长度，同时填充 content_rich 和 content_text
+                // 解析富文本，填充 content_rich 和 tokens
                 text_len = parse_message_content(msg_val, &mut record);
 
                 true
@@ -281,43 +292,26 @@ pub fn handle(
                 }
                 let now = Local::now().timestamp();
                 record.time = Set(now);
-                record.message_id = Set(0);
                 record.message_type = Set(packet.message_type().unwrap_or("unknown").to_string());
-                record.sub_type = Set("normal".to_string());
 
                 let group_id = packet.group_id().unwrap_or(0);
+                record.group_id = Set(group_id);
 
-                if group_id != 0 {
-                    record.guild_id = Set(group_id.to_string());
-                    record.channel_id = Set(group_id.to_string());
+                // 尝试获取群名（如果 available）
+                if let Some(origin) = &packet.original_event {
+                    let origin_gid = origin
+                        .get_i64("group_id")
+                        .or_else(|| origin.get_u64("group_id").map(|v| v as i64))
+                        .unwrap_or(0);
 
-                    if let Some(origin) = &packet.original_event {
-                        let origin_gid = origin
-                            .get_i64("group_id")
-                            .or_else(|| origin.get_u64("group_id").map(|v| v as i64))
-                            .unwrap_or(0);
-
-                        if origin_gid != 0 && origin_gid == group_id {
-                            let g_name = origin.get_str("group_name").unwrap_or("").to_string();
-                            record.guild_name = Set(g_name.clone());
-                            record.channel_name = Set(g_name);
-
-                            if let Some(raw) = origin.get("raw") {
-                                if let Some(gn) = raw.get_str("guildName") {
-                                    record.guild_name = Set(gn.to_string());
-                                }
-                                if let Some(cn) = raw.get_str("channelName") {
-                                    record.channel_name = Set(cn.to_string());
-                                }
-                            }
-                        } else {
-                            record.guild_name = Set("".to_string());
-                            record.channel_name = Set("".to_string());
-                        }
+                    if origin_gid != 0 && origin_gid == group_id {
+                        let g_name = origin.get_str("group_name").unwrap_or("").to_string();
+                        record.group_name = Set(g_name);
                     } else {
-                        record.guild_name = Set("".to_string());
-                        record.channel_name = Set("".to_string());
+                        record.group_name = Set("".to_string());
                     }
+                } else {
+                    record.group_name = Set("".to_string());
                 }
 
                 if let Ok(uid) = ctx.bot.login_user.id.parse::<i64>() {
@@ -334,23 +328,8 @@ pub fn handle(
                 record.role = Set("self".to_string());
 
                 let msg_val = packet.message();
-                let raw_json = if let Some(v) = msg_val {
-                    simd_json::to_string(v).unwrap_or_else(|_| "null".to_string())
-                } else {
-                    "null".to_string()
-                };
-                record.raw_message_json = Set(raw_json);
 
-                // 解析富文本，并获取纯文本长度，同时填充 content_rich 和 content_text
                 text_len = parse_message_content(msg_val, &mut record);
-
-                let is_raw_empty = match &record.content_raw {
-                    ActiveValue::Set(s) | ActiveValue::Unchanged(s) => s.is_empty(),
-                    _ => true,
-                };
-                if is_raw_empty && let ActiveValue::Set(rich) = &record.content_rich {
-                    record.content_raw = Set(rich.clone());
-                }
 
                 true
             }
@@ -381,11 +360,10 @@ pub fn handle(
     })
 }
 
-/// 解析消息段数组，提取富文本摘要、特征标记以及纯文本拼接，并返回纯文本字符个数
+/// 解析消息段数组，提取富文本摘要、特征标记以及生成分词，并返回纯文本字符个数
 fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActiveModel) -> i32 {
     let mut rich_text = String::new();
-    let mut plain_text_acc = String::new();
-    // 存储分段的纯文本，用于最终拼接 content_text
+    // 存储分段的纯文本，用于最终拼接 tokens
     let mut text_segments: Vec<String> = Vec::new();
     let mut text_char_count = 0;
 
@@ -409,7 +387,6 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
         // 情况 1: 纯字符串消息
         if let Some(s) = val.as_str() {
             rich_text.push_str(s);
-            plain_text_acc.push_str(s);
             text_segments.push(s.trim().to_string());
             text_char_count += s.chars().count();
         }
@@ -423,7 +400,6 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
                     "text" => {
                         if let Some(t) = data.and_then(|d| d.get_str("text")) {
                             rich_text.push_str(t);
-                            plain_text_acc.push_str(t);
                             let trimmed = t.trim();
                             if !trimmed.is_empty() {
                                 text_segments.push(trimmed.to_string());
@@ -441,7 +417,7 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
                                     .or_else(|| d.get_u64("qq").map(|i| i.to_string()))
                             })
                             .unwrap_or_default();
-                        rich_text.push_str(&format!("[@param={}]", qq));
+                        rich_text.push_str(&format!("[@{}]", qq));
                     }
                     "face" => {
                         face_count += 1;
@@ -506,7 +482,6 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
 
     // 拼接纯文本并进行分词
     let joined_text = text_segments.join(" ");
-    record.content_text = Set(joined_text.clone());
 
     if !joined_text.is_empty() {
         let jieba = get_jieba();
@@ -514,15 +489,6 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
         record.tokens = Set(tokens.join(" "));
     } else {
         record.tokens = Set("".to_string());
-    }
-
-    let is_raw_empty = match &record.content_raw {
-        ActiveValue::Set(s) | ActiveValue::Unchanged(s) => s.is_empty(),
-        _ => true,
-    };
-
-    if is_raw_empty {
-        record.content_raw = Set(plain_text_acc);
     }
 
     record.has_image = Set(image_count > 0);

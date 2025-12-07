@@ -1,0 +1,226 @@
+use crate::plugins::stats_visualizer::StatsConfig;
+use crate::warn;
+use base64::{Engine as _, engine::general_purpose};
+use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+use plotters::prelude::*;
+use std::env;
+use std::fs;
+use std::sync::OnceLock;
+
+const EMBEDDED_FONT_DATA: &[u8] = include_bytes!("../../../../res/HarmonyOS_Sans_Regular.ttf");
+
+// ================= 配色方案 =================
+
+pub struct ColorScheme {
+    pub background: RGBColor,
+    pub card_background: RGBColor,
+    pub primary: RGBColor,
+    pub text_primary: RGBColor,
+    pub text_secondary: RGBColor,
+    pub grid_line: RGBColor,
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self {
+            background: RGBColor(255, 255, 255),
+            card_background: RGBColor(255, 255, 255),
+            primary: RGBColor(59, 130, 246),
+            text_primary: RGBColor(30, 41, 59),
+            text_secondary: RGBColor(100, 116, 139),
+            grid_line: RGBColor(226, 232, 240),
+        }
+    }
+}
+
+static CACHED_FONT_PATH: OnceLock<String> = OnceLock::new();
+
+pub fn get_font_family(config: &StatsConfig) -> &str {
+    if let Some(path) = &config.font_path
+        && std::path::Path::new(path).exists()
+    {
+        return path.as_str();
+    }
+
+    CACHED_FONT_PATH.get_or_init(|| {
+        let mut temp_path = env::temp_dir();
+        temp_path.push("bot_embedded_harmony_sans.ttf");
+
+        // 仅当文件不存在时写入，避免重复IO
+        if !temp_path.exists()
+             && let Err(e) = fs::write(&temp_path, EMBEDDED_FONT_DATA) {
+                warn!(target: "Plugin/Stats", "无法释放内置字体到临时目录: {}, 将回退到系统字体", e);
+                return "sans-serif".to_string();
+            }
+
+        temp_path.to_string_lossy().to_string()
+    }).as_str()
+}
+
+pub fn get_font<'a>(config: &'a StatsConfig, size: u32) -> TextStyle<'a> {
+    let colors = ColorScheme::default();
+    let family = get_font_family(config);
+
+    (family, size).into_font().color(&colors.text_primary)
+}
+
+pub fn get_font_with_color<'a>(
+    config: &'a StatsConfig,
+    size: u32,
+    color: &'a RGBColor,
+) -> TextStyle<'a> {
+    let family = get_font_family(config);
+
+    (family, size).into_font().color(color)
+}
+
+pub fn get_contrast_color(bg_color: RGBColor) -> RGBColor {
+    let (r, g, b) = (bg_color.0 as u32, bg_color.1 as u32, bg_color.2 as u32);
+    // YIQ brightness formula
+    let yiq = (r * 299 + g * 587 + b * 114) / 1000;
+    if yiq >= 128 {
+        RGBColor(0, 0, 0)
+    } else {
+        RGBColor(255, 255, 255)
+    }
+}
+
+pub fn mix_with_white(color: RGBColor, opacity: f32) -> RGBColor {
+    let r = (color.0 as f32 * opacity + 255.0 * (1.0 - opacity)) as u8;
+    let g = (color.1 as f32 * opacity + 255.0 * (1.0 - opacity)) as u8;
+    let b = (color.2 as f32 * opacity + 255.0 * (1.0 - opacity)) as u8;
+    RGBColor(r, g, b)
+}
+
+pub fn save_rgba_to_base64(img: RgbaImage) -> Result<String, String> {
+    let dynamic_image = DynamicImage::ImageRgba8(img);
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    dynamic_image
+        .write_to(&mut cursor, ImageFormat::Png)
+        .map_err(|e| format!("图片编码失败: {}", e))?;
+    let b64 = general_purpose::STANDARD.encode(cursor.into_inner());
+    Ok(format!("base64://{}", b64))
+}
+
+pub fn truncate_text_to_fit(
+    font: &plotters::style::FontDesc,
+    text: &str,
+    max_width: u32,
+) -> String {
+    let (w, _) = font.box_size(text).unwrap_or((0, 0));
+    if w <= max_width {
+        return text.to_string();
+    }
+
+    let mut s = text.to_string();
+    while !s.is_empty() {
+        s.pop();
+        let candidate = format!("{}...", s);
+        let (w, _) = font.box_size(&candidate).unwrap_or((0, 0));
+        if w <= max_width {
+            return candidate;
+        }
+    }
+    "...".to_string()
+}
+
+pub fn get_average_color(img: &RgbaImage) -> RGBColor {
+    let mut r_sum = 0u64;
+    let mut g_sum = 0u64;
+    let mut b_sum = 0u64;
+    let count = (img.width() * img.height()) as u64;
+
+    if count == 0 {
+        return RGBColor(59, 130, 246);
+    }
+
+    for p in img.pixels() {
+        r_sum += p[0] as u64;
+        g_sum += p[1] as u64;
+        b_sum += p[2] as u64;
+    }
+
+    RGBColor(
+        (r_sum / count) as u8,
+        (g_sum / count) as u8,
+        (b_sum / count) as u8,
+    )
+}
+
+pub fn make_circular_avatar(img: &DynamicImage, size: u32) -> RgbaImage {
+    let rgba = img.to_rgba8();
+    let mut result = RgbaImage::new(size, size);
+    let center = size as f32 / 2.0;
+    let radius = center - 1.0;
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center + 0.5;
+            let dy = y as f32 - center + 0.5;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist <= radius - 0.5 {
+                result.put_pixel(x, y, *rgba.get_pixel(x, y));
+            } else if dist <= radius + 0.5 {
+                let alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                let mut pixel = *rgba.get_pixel(x, y);
+                pixel[3] = (pixel[3] as f32 * alpha) as u8;
+                result.put_pixel(x, y, pixel);
+            }
+        }
+    }
+    result
+}
+
+pub fn create_default_avatar(size: u32) -> RgbaImage {
+    let mut result = RgbaImage::new(size, size);
+    let center = size as f32 / 2.0;
+    let radius = center - 1.0;
+    let bg_color = Rgba([200, 200, 200, 255]);
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center + 0.5;
+            let dy = y as f32 - center + 0.5;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist <= radius - 0.5 {
+                result.put_pixel(x, y, bg_color);
+            } else if dist <= radius + 0.5 {
+                let alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                let mut pixel = bg_color;
+                pixel[3] = (255.0 * alpha) as u8;
+                result.put_pixel(x, y, pixel);
+            }
+        }
+    }
+    result
+}
+
+pub fn overlay_image(base: &mut RgbaImage, overlay: &RgbaImage, x: i32, y: i32) {
+    let (base_w, base_h) = base.dimensions();
+    let (overlay_w, overlay_h) = overlay.dimensions();
+
+    for oy in 0..overlay_h {
+        for ox in 0..overlay_w {
+            let bx = x + ox as i32;
+            let by = y + oy as i32;
+
+            if bx >= 0 && bx < base_w as i32 && by >= 0 && by < base_h as i32 {
+                let bg = base.get_pixel(bx as u32, by as u32);
+                let fg = overlay.get_pixel(ox, oy);
+
+                let alpha = fg[3] as f32 / 255.0;
+                if alpha > 0.0 {
+                    let blended = Rgba([
+                        ((1.0 - alpha) * bg[0] as f32 + alpha * fg[0] as f32) as u8,
+                        ((1.0 - alpha) * bg[1] as f32 + alpha * fg[1] as f32) as u8,
+                        ((1.0 - alpha) * bg[2] as f32 + alpha * fg[2] as f32) as u8,
+                        255,
+                    ]);
+                    base.put_pixel(bx as u32, by as u32, blended);
+                }
+            }
+        }
+    }
+}

@@ -15,7 +15,6 @@ pub mod config;
 pub mod image;
 pub mod stopwords;
 
-// Re-export for plugin system
 use config::WordCloudConfig;
 pub use config::default_config;
 
@@ -70,10 +69,10 @@ pub fn handle(
 
             let (start_time, end_time) = get_time_range(time_str);
 
-            let (query_guild_id, query_user_id) = match scope_str {
+            let (query_group_id, query_user_id) = match scope_str {
                 "本群" => {
                     if let Some(gid) = msg.group_id() {
-                        (Some(gid.to_string()), None)
+                        (Some(gid), None)
                     } else {
                         (None, Some(msg.user_id()))
                     }
@@ -83,7 +82,7 @@ pub fn handle(
                 _ => (None, None),
             };
 
-            if scope_str == "本群" && query_guild_id.is_none() && msg.group_id().is_none() {
+            if scope_str == "本群" && query_group_id.is_none() && msg.group_id().is_none() {
                 let reply =
                     Message::new().text("请在群聊中使用“本群”指令，或使用“我的”查看个人词云。");
                 send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
@@ -93,7 +92,7 @@ pub fn handle(
             match generate_and_send(
                 &ctx,
                 writer,
-                query_guild_id.as_deref(),
+                query_group_id,
                 query_user_id,
                 start_time,
                 end_time,
@@ -117,7 +116,6 @@ pub fn handle(
     })
 }
 
-/// Bot 连接成功后的钩子
 pub fn on_connected(
     ctx: Context,
     writer: LockedWriter,
@@ -132,7 +130,7 @@ pub fn on_connected(
 
         let scheduler = ctx.scheduler.clone();
 
-        // 调试模式单独处理 (Interval)
+        // 调试模式
         if config.debug_push_interval > 0 {
             info!(target: "Plugin/WordCloud", "已开启词云调试推送，间隔: {}秒", config.debug_push_interval);
             let ctx_debug = ctx.clone();
@@ -140,11 +138,9 @@ pub fn on_connected(
             scheduler.add_interval(
                 std::time::Duration::from_secs(config.debug_push_interval),
                 move || {
-                    // 复用每日推送的逻辑函数
                     let c = ctx_debug.clone();
                     let w = writer_debug.clone();
                     async move {
-                        // 临时构造配置用于调试
                         let cfg = WordCloudConfig {
                             enabled: true,
                             limit: 50,
@@ -161,7 +157,7 @@ pub fn on_connected(
                 },
             );
         } else {
-            // 正常每日推送使用 Scheduler 通用逻辑
+            // 正常每日推送
             scheduler.schedule_daily_push(
                 ctx.clone(),
                 writer.clone(),
@@ -172,7 +168,7 @@ pub fn on_connected(
                     let result = generate_and_send(
                         &c,
                         w,
-                        Some(&gid.to_string()),
+                        Some(gid),
                         None,
                         start_time,
                         end_time,
@@ -194,7 +190,6 @@ pub fn on_connected(
     })
 }
 
-// 保留原有的逻辑函数供 debug 调用
 async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCloudConfig) {
     let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
         Ok(list) => list,
@@ -208,7 +203,6 @@ async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCl
 
     for g in group_list {
         let gid = g.group_id;
-        // 简单过滤逻辑 (正式逻辑已移至 Scheduler)
         let should_skip = {
             let guard = ctx.config.read().unwrap();
             if guard.global_filter.enable_whitelist {
@@ -224,7 +218,7 @@ async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCl
         let _ = generate_and_send(
             &ctx,
             writer.clone(),
-            Some(&gid.to_string()),
+            Some(gid),
             None,
             start_time,
             end_time,
@@ -237,13 +231,11 @@ async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCl
     }
 }
 
-// === 核心生成逻辑 ===
-
 #[allow(clippy::too_many_arguments)]
 async fn generate_and_send(
     ctx: &Context,
     writer: LockedWriter,
-    query_guild_id: Option<&str>,
+    query_group_id: Option<i64>,
     query_user_id: Option<i64>,
     start_time: i64,
     end_time: i64,
@@ -257,11 +249,10 @@ async fn generate_and_send(
 
     let db = &ctx.db;
     let corpus_result =
-        get_text_corpus(db, query_guild_id, query_user_id, start_time, end_time).await;
+        get_text_corpus(db, query_group_id, query_user_id, start_time, end_time).await;
 
     let mut corpus = match corpus_result {
         Ok(c) if c.is_empty() => {
-            // 如果是主动推送，没有数据则静默跳过
             if reply_msg_id.is_none() {
                 return Ok(());
             }
@@ -279,7 +270,6 @@ async fn generate_and_send(
         corpus = corpus.split_off(start);
     }
 
-    // 如果是指令触发，发送提示；主动推送则略过
     if let Some(msg_id) = reply_msg_id {
         let _reply_prefix = format!("正在生成 {}，样本数: {}...", title, corpus.len());
         let _ = send_msg(
@@ -304,10 +294,8 @@ async fn generate_and_send(
 
     match final_msg {
         Ok(Ok(base64_image)) => {
-            // 2. 发送纯图片消息
             let img_msg = Message::new().image(base64_image);
             let _ = send_msg(ctx, writer, target_group_id, target_user_id, img_msg).await;
-
             Ok(())
         }
         Ok(Err(e)) => {
