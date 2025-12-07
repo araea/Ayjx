@@ -66,6 +66,8 @@ pub fn generate_word_cloud(
     }
 
     let wordcloud = builder
+        .angles(vec![0.0, 90.0])
+        .vertical_writing(true)
         .build(&top_words)
         .map_err(|e| format!("Build Error: {}", e))?;
 

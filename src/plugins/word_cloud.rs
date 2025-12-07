@@ -149,7 +149,7 @@ pub fn on_connected(
                             font_path: None,
                             max_msg: 50000,
                             daily_push_enabled: true,
-                            daily_push_time: "".to_string(),
+                            daily_push_time: "23:30:00".to_string(),
                             debug_push_interval: 0,
                         };
                         do_daily_push_logic(c, w, cfg).await;

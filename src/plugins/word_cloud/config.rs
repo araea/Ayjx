@@ -42,7 +42,7 @@ fn default_max_msg() -> usize {
 }
 
 fn default_daily_push_time() -> String {
-    "23:00:00".to_string()
+    "23:30:00".to_string()
 }
 
 pub fn default_config() -> Value {
@@ -54,7 +54,7 @@ pub fn default_config() -> Value {
         font_path: None,
         max_msg: 50000,
         daily_push_enabled: false,
-        daily_push_time: "23:00:00".to_string(),
+        daily_push_time: "23:30:00".to_string(),
         debug_push_interval: 0,
     })
 }
