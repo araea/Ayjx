@@ -3,12 +3,12 @@ use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::config::build_config;
 use crate::db::queries::get_text_corpus;
+use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
 use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
-use chrono::{Datelike, Duration, Local};
 use futures_util::future::BoxFuture;
 use image::{GenericImageView, ImageFormat};
 use rand::Rng;
@@ -84,7 +84,10 @@ static COMMAND_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn get_regex() -> &'static Regex {
     COMMAND_REGEX.get_or_init(|| {
-        Regex::new(r"^(本群|跨群|我的)(今日|昨日|本周|近7天|本月|今年|总)词云$").unwrap()
+        Regex::new(
+            r"^(本群|跨群|我的)(今日|昨日|本周|上周|近7天|近30天|本月|上月|今年|去年|总)词云$",
+        )
+        .unwrap()
     })
 }
 
@@ -420,59 +423,6 @@ async fn generate_and_send(
 }
 
 // === 辅助逻辑 ===
-
-fn get_time_range(time_str: &str) -> (i64, i64) {
-    let now = Local::now();
-    let today_start = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_local_timezone(Local)
-        .unwrap();
-
-    match time_str {
-        "今日" => (today_start.timestamp(), now.timestamp()),
-        "昨日" => {
-            let yest_start = today_start - Duration::days(1);
-            (yest_start.timestamp(), today_start.timestamp())
-        }
-        "本周" => {
-            let weekday = now.weekday().num_days_from_monday();
-            let week_start = today_start - Duration::days(weekday as i64);
-            (week_start.timestamp(), now.timestamp())
-        }
-        "近7天" => {
-            let start = now - Duration::days(7);
-            (start.timestamp(), now.timestamp())
-        }
-        "本月" => {
-            let month_start = now
-                .date_naive()
-                .with_day(1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_local_timezone(Local)
-                .unwrap();
-            (month_start.timestamp(), now.timestamp())
-        }
-        "今年" => {
-            let year_start = now
-                .date_naive()
-                .with_month(1)
-                .unwrap()
-                .with_day(1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_local_timezone(Local)
-                .unwrap();
-            (year_start.timestamp(), now.timestamp())
-        }
-        "总" => (0, now.timestamp()),
-        _ => (today_start.timestamp(), now.timestamp()),
-    }
-}
 
 fn generate_word_cloud(
     corpus: Vec<String>,
