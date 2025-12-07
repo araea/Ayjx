@@ -54,7 +54,6 @@ where
     send_frame_raw(writer, json_str).await?;
 
     // 等待响应
-    // 由于 bot.rs 中改为并发处理，这里 await 不会阻塞 WebSocket 读取循环
     let resp_event = wait_future.await.ok_or("API 请求超时")?;
 
     // 解析响应

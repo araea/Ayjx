@@ -37,7 +37,7 @@ struct WordCloudConfig {
     #[serde(default = "default_max_msg")]
     max_msg: usize,
 
-    // === 新增配置: 每日推送 ===
+    // === 每日推送 ===
     #[serde(default)]
     daily_push_enabled: bool,
     #[serde(default = "default_daily_push_time")]
@@ -137,13 +137,13 @@ pub fn handle(
                     }
                 }
                 "跨群" => (None, None),
-                "发送者" => (None, Some(msg.user_id())),
+                "我的" => (None, Some(msg.user_id())),
                 _ => (None, None),
             };
 
             if scope_str == "本群" && query_guild_id.is_none() && msg.group_id().is_none() {
                 let reply =
-                    Message::new().text("请在群聊中使用“本群”指令，或使用“发送者”查看个人词云。");
+                    Message::new().text("请在群聊中使用“本群”指令，或使用“我的”查看个人词云。");
                 send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
                 return Ok(None);
             }
@@ -241,27 +241,43 @@ pub fn on_connected(
 async fn do_daily_push(ctx: Context, writer: LockedWriter, _config: WordCloudConfig) {
     info!(target: "Plugin/WordCloud", "开始执行每日词云推送...");
 
-    // 1. 获取群列表
-    let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
-        Ok(list) => list,
-        Err(e) => {
-            warn!(target: "Plugin/WordCloud", "获取群列表失败: {}", e);
-            return;
-        }
+    // 1. 确定目标群列表
+    let (whitelist_mode, whitelist_ids) = {
+        let guard = ctx.config.read().unwrap();
+        (
+            guard.global_filter.enable_whitelist,
+            guard.global_filter.whitelist.clone(),
+        )
     };
 
-    if group_list.is_empty() {
-        info!(target: "Plugin/WordCloud", "群列表为空，跳过推送。");
-        return;
-    }
+    let groups_to_push: Vec<i64> = if whitelist_mode {
+        if whitelist_ids.is_empty() {
+            info!(target: "Plugin/WordCloud", "白名单模式已开启但列表为空，跳过推送。");
+            return;
+        }
+        whitelist_ids.into_iter().collect()
+    } else {
+        let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
+            Ok(list) => list,
+            Err(e) => {
+                warn!(target: "Plugin/WordCloud", "获取群列表失败: {}", e);
+                return;
+            }
+        };
+
+        if group_list.is_empty() {
+            info!(target: "Plugin/WordCloud", "群列表为空，跳过推送。");
+            return;
+        }
+
+        group_list.into_iter().map(|g| g.group_id).collect()
+    };
 
     let (start_time, end_time) = get_time_range("今日");
 
     // 2. 遍历群推送
-    for group in group_list {
-        let group_id = group.group_id;
-
-        // 全局黑白名单过滤
+    for group_id in groups_to_push {
+        // 二次检查过滤规则 (防止配置变更，以及处理黑名单模式)
         let should_skip = {
             let guard = ctx.config.read().unwrap();
             let filter = &guard.global_filter;
