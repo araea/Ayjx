@@ -12,7 +12,7 @@ http = "1.4"
 image = "0.25"
 jieba-rs = "0.8"
 md5 = "0.8"
-plotters = "0.3"
+plotters = { version = "0.3", features = ["ab_glyph"] }
 rand = "0.9"
 regex = "1.12"
 reqwest = "0.12"

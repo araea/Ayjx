@@ -1,7 +1,7 @@
 use super::data_loader::{BarData, SeriesData};
 use super::utils::{
-    ColorScheme, get_contrast_color, get_font, get_font_with_color, mix_with_white, overlay_image,
-    save_rgba_to_base64, truncate_text_to_fit,
+    ColorScheme, get_contrast_color, get_font, get_font_family, get_font_with_color,
+    mix_with_white, overlay_image, save_rgba_to_base64, truncate_text_to_fit,
 };
 use crate::plugins::stats_visualizer::StatsConfig;
 use chrono::Local;
@@ -46,33 +46,29 @@ pub fn draw_bar_chart(
     let max_val = data.iter().map(|d| d.value).max().unwrap_or(1).max(1);
     let total_val: i64 = data.iter().map(|d| d.value).sum();
 
-    let font_obj = if let Some(path) = &config.font_path
-        && std::fs::read(path).is_ok()
-    {
-        (path.as_str(), font_size).into_font()
-    } else {
-        ("sans-serif", font_size).into_font()
-    };
+    let font_family = get_font_family(config);
+    let font_obj = (font_family, font_size).into_font();
 
     let mut formatted_counts = Vec::new();
     let mut max_count_text_width = 0u32;
 
     for item in data.iter() {
         let mut text = item.value.to_string();
-        // 只有最大值才显示百分比，或者全部显示？原逻辑只针对 max_val 计算了 pct 但逻辑似乎是想给第一名加？
-        // 这里稍微优化一下：只给Top3或所有显示占比
+        // 只有最大值才显示百分比
         if item.value == max_val && max_val > 0 {
             let pct = if total_val > 0 {
                 item.value as f64 / total_val as f64 * 100.0
             } else {
                 0.0
             };
-            let pct_str = if pct < 0.01 && pct > 0.0 {
+            let pct_str = if pct > 0.0 && pct < 0.01 {
                 "<0.01".to_string()
-            } else if pct < 1.0 {
+            } else if pct > 0.0 && pct < 1.0 {
                 format!("{:.2}", pct)
-            } else {
+            } else if pct >= 1.0 {
                 format!("{:.0}", pct)
+            } else {
+                "0".to_string()
             };
             text = format!("{} ({}%)", text, pct_str);
         }

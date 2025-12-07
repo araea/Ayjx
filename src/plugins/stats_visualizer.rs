@@ -20,8 +20,9 @@ mod chart;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StatsConfig {
     pub enabled: bool,
-    #[serde(default = "default_font_path")]
-    pub font_path: Option<String>,
+    // 将字体路径改为字体族名称配置
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
     #[serde(default = "default_width")]
     pub width: u32,
     #[serde(default = "default_height")]
@@ -35,8 +36,9 @@ pub struct StatsConfig {
     pub daily_push_scope: String,
 }
 
-fn default_font_path() -> Option<String> {
-    None
+fn default_font_family() -> String {
+    // 默认使用 Noto Sans CJK SC
+    "Noto Sans CJK SC".to_string()
 }
 
 fn default_width() -> u32 {
@@ -54,7 +56,7 @@ fn default_daily_push_time() -> String {
 pub fn default_config() -> Value {
     build_config(StatsConfig {
         enabled: true,
-        font_path: None,
+        font_family: "Noto Sans CJK SC".to_string(),
         width: 960,
         height: 800,
         daily_push_enabled: false,

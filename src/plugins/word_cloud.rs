@@ -87,9 +87,8 @@ pub fn handle(
                 send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
                 return Ok(None);
             }
-
             let title = format!("{} 的 {} 词云", scope_str, time_str);
-            let reply_id = Some(msg.message_id());
+            let reply_id = msg.message_id();
             let target_group = msg.group_id();
             let target_user = Some(msg.user_id());
 
@@ -100,7 +99,7 @@ pub fn handle(
                 target_group,
                 target_user,
                 Message::new()
-                    .reply(reply_id.unwrap_or(0))
+                    .reply(reply_id)
                     .text(format!("正在生成 {}...", title)),
             )
             .await;

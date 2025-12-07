@@ -1,13 +1,7 @@
 use crate::plugins::stats_visualizer::StatsConfig;
-use crate::warn;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use plotters::prelude::*;
-use std::env;
-use std::fs;
-use std::sync::OnceLock;
-
-const EMBEDDED_FONT_DATA: &[u8] = include_bytes!("../../../../res/HarmonyOS_Sans_Regular.ttf");
 
 // ================= 配色方案 =================
 
@@ -33,28 +27,12 @@ impl Default for ColorScheme {
     }
 }
 
-static CACHED_FONT_PATH: OnceLock<String> = OnceLock::new();
-
 pub fn get_font_family(config: &StatsConfig) -> &str {
-    if let Some(path) = &config.font_path
-        && std::path::Path::new(path).exists()
-    {
-        return path.as_str();
+    if config.font_family.is_empty() {
+        "sans-serif"
+    } else {
+        &config.font_family
     }
-
-    CACHED_FONT_PATH.get_or_init(|| {
-        let mut temp_path = env::temp_dir();
-        temp_path.push("bot_embedded_harmony_sans.ttf");
-
-        // 仅当文件不存在时写入，避免重复IO
-        if !temp_path.exists()
-             && let Err(e) = fs::write(&temp_path, EMBEDDED_FONT_DATA) {
-                warn!(target: "Plugin/Stats", "无法释放内置字体到临时目录: {}, 将回退到系统字体", e);
-                return "sans-serif".to_string();
-            }
-
-        temp_path.to_string_lossy().to_string()
-    }).as_str()
 }
 
 pub fn get_font<'a>(config: &'a StatsConfig, size: u32) -> TextStyle<'a> {
