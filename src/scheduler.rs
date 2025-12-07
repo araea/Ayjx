@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::adapters::onebot::{LockedWriter, api};
+use crate::event::Context;
 use chrono::{DateTime, Local, TimeZone};
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,22 +25,6 @@ impl Scheduler {
     }
 
     /// 添加一个灵活调度任务
-    ///
-    /// # 参数
-    /// - `next_run_calculator`: 一个闭包，接收当前时间，返回下一次执行时间。如果返回 None，任务停止。
-    /// - `task_gen`: 任务生成闭包。
-    ///
-    /// # 示例：每天 0 点执行
-    /// ```rust
-    /// scheduler.add_schedule(
-    ///     |now| {
-    ///         // 获取明天的 0 点
-    ///         let tomorrow = now.date_naive().succ_opt()?.and_hms_opt(0, 0, 0)?;
-    ///         Local.from_local_datetime(&tomorrow).single()
-    ///     },
-    ///     || async { println!("Midnight!"); }
-    /// );
-    /// ```
     pub fn add_schedule<C, F, Fut>(&self, mut next_run_calculator: C, mut task_gen: F) -> u64
     where
         C: FnMut(DateTime<Local>) -> Option<DateTime<Local>> + Send + 'static,
@@ -115,6 +101,110 @@ impl Scheduler {
             },
             task_gen,
         )
+    }
+
+    /// 通用工具：配置并调度每日推送任务
+    /// 包含：时间解析、群列表获取、黑白名单过滤、遍历执行
+    pub fn schedule_daily_push<F, Fut>(
+        &self,
+        ctx: Context,
+        writer: LockedWriter,
+        plugin_name: &str,
+        time_str: String,
+        task_logic: F,
+    ) where
+        F: Fn(Context, LockedWriter, i64) -> Fut + Send + Sync + 'static + Clone,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        // 1. 解析时间
+        let parts: Vec<&str> = time_str.split(':').collect();
+        let (h, m, s) = if parts.len() >= 2 {
+            (
+                parts[0].parse().unwrap_or(23),
+                parts[1].parse().unwrap_or(30),
+                parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0),
+            )
+        } else {
+            (23, 30, 0)
+        };
+
+        info!(
+            target: format!("Plugin/{}", plugin_name).as_str(),
+            "已计划每日推送: {:02}:{:02}:{:02}", h, m, s
+        );
+
+        // 2. 调度任务
+        let plugin_name_owned = plugin_name.to_string();
+        self.add_daily_at(h, m, s, move || {
+            let ctx = ctx.clone();
+            let writer = writer.clone();
+            let task_logic = task_logic.clone();
+            let p_name = plugin_name_owned.clone();
+
+            async move {
+                info!(target: format!("Plugin/{}", p_name).as_str(), "开始执行每日推送...");
+
+                // 3. 获取群列表
+                let groups = match api::get_group_list(&ctx, writer.clone(), false).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        error!(target: format!("Plugin/{}", p_name).as_str(), "获取群列表失败: {}", e);
+                        return;
+                    }
+                };
+
+                // 4. 准备过滤规则
+                let (whitelist_mode, whitelist, blacklist) = {
+                    let guard = ctx.config.read().unwrap();
+                    (
+                        guard.global_filter.enable_whitelist,
+                        guard.global_filter.whitelist.clone(),
+                        guard.global_filter.blacklist.clone(),
+                    )
+                };
+
+                // 5. 过滤目标群
+                let target_groups: Vec<i64> = groups
+                    .into_iter()
+                    .map(|g| g.group_id)
+                    .filter(|gid| {
+                        if whitelist_mode {
+                            whitelist.contains(gid)
+                        } else {
+                            !blacklist.contains(gid)
+                        }
+                    })
+                    .collect();
+
+                if target_groups.is_empty() {
+                    info!(target: format!("Plugin/{}", p_name).as_str(), "没有符合条件的群组，跳过推送。");
+                    return;
+                }
+
+                // 6. 遍历执行
+                for gid in target_groups {
+                    // 二次检查配置（可选，防止配置热更后未生效）
+                    let should_skip = {
+                        let guard = ctx.config.read().unwrap();
+                        if guard.global_filter.enable_whitelist {
+                            !guard.global_filter.whitelist.contains(&gid)
+                        } else {
+                            guard.global_filter.blacklist.contains(&gid)
+                        }
+                    };
+                    if should_skip {
+                        continue;
+                    }
+
+                    // 执行具体逻辑
+                    task_logic(ctx.clone(), writer.clone(), gid).await;
+
+                    // 间隔防风控
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                info!(target: format!("Plugin/{}", p_name).as_str(), "每日推送任务完成。");
+            }
+        });
     }
 
     pub fn remove(&self, id: u64) {

@@ -19,6 +19,7 @@ pub mod ping_pong;
 pub mod recall;
 pub mod recorder;
 pub mod repeater;
+pub mod stats_visualizer;
 pub mod word_cloud;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
@@ -105,6 +106,13 @@ pub fn get_plugins() -> &'static [Plugin] {
                 on_init: None,
                 on_connected: Some(word_cloud::on_connected),
                 default_config: word_cloud::default_config,
+            },
+            Plugin {
+                name: "stats_visualizer",
+                handler: stats_visualizer::handle,
+                on_init: None,
+                on_connected: Some(stats_visualizer::on_connected),
+                default_config: stats_visualizer::default_config,
             },
         ]
     })

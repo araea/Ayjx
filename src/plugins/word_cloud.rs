@@ -151,7 +151,6 @@ pub fn handle(
                 return Ok(None);
             }
 
-            // 调用生成逻辑
             match generate_and_send(
                 &ctx,
                 writer,
@@ -179,7 +178,7 @@ pub fn handle(
     })
 }
 
-/// Bot 连接成功后的钩子：注册每日推送任务
+/// Bot 连接成功后的钩子
 pub fn on_connected(
     ctx: Context,
     writer: LockedWriter,
@@ -194,137 +193,113 @@ pub fn on_connected(
 
         let scheduler = ctx.scheduler.clone();
 
-        // 构造任务闭包
-        let ctx_for_task = ctx.clone();
-        let writer_for_task = writer.clone();
-
-        let task_closure = move || {
-            let ctx_inner = ctx_for_task.clone();
-            let writer_inner = writer_for_task.clone();
-
-            async move {
-                let current_cfg: WordCloudConfig = get_config(&ctx_inner, "word_cloud")
-                    .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
-
-                if current_cfg.daily_push_enabled {
-                    do_daily_push(ctx_inner, writer_inner, current_cfg).await;
-                }
-            }
-        };
-
+        // 调试模式单独处理 (Interval)
         if config.debug_push_interval > 0 {
             info!(target: "Plugin/WordCloud", "已开启词云调试推送，间隔: {}秒", config.debug_push_interval);
+            let ctx_debug = ctx.clone();
+            let writer_debug = writer.clone();
             scheduler.add_interval(
                 std::time::Duration::from_secs(config.debug_push_interval),
-                task_closure,
+                move || {
+                    // 复用每日推送的逻辑函数
+                    let c = ctx_debug.clone();
+                    let w = writer_debug.clone();
+                    async move {
+                        // 临时构造配置用于调试
+                        let cfg = WordCloudConfig {
+                            enabled: true,
+                            limit: 50,
+                            width: 800,
+                            height: 600,
+                            font_path: None,
+                            max_msg: 50000,
+                            daily_push_enabled: true,
+                            daily_push_time: "".to_string(),
+                            debug_push_interval: 0,
+                        };
+                        do_daily_push_logic(c, w, cfg).await;
+                    }
+                },
             );
         } else {
-            let parts: Vec<&str> = config.daily_push_time.split(':').collect();
-            let (h, m, s) = if parts.len() == 3 {
-                (
-                    parts[0].parse().unwrap_or(23),
-                    parts[1].parse().unwrap_or(0),
-                    parts[2].parse().unwrap_or(0),
-                )
-            } else {
-                (23, 0, 0)
-            };
+            // 正常每日推送使用 Scheduler 通用逻辑
+            scheduler.schedule_daily_push(
+                ctx.clone(),
+                writer.clone(),
+                "WordCloud",
+                config.daily_push_time.clone(),
+                move |c, w, gid| async move {
+                    let (start_time, end_time) = get_time_range("今日");
+                    let result = generate_and_send(
+                        &c,
+                        w,
+                        Some(&gid.to_string()),
+                        None,
+                        start_time,
+                        end_time,
+                        Some(gid),
+                        None,
+                        None,
+                        "本群今日词云 (每日推送)".to_string(),
+                    )
+                    .await;
 
-            info!(target: "Plugin/WordCloud", "已开启词云每日推送，时间: {:02}:{:02}:{:02}", h, m, s);
-            scheduler.add_daily_at(h, m, s, task_closure);
+                    if let Err(e) = result {
+                        warn!(target: "Plugin/WordCloud", "群 {} 推送失败: {}", gid, e);
+                    }
+                },
+            );
         }
 
         Ok(Some(ctx))
     })
 }
 
-// === 核心逻辑 ===
-
-/// 执行每日推送
-async fn do_daily_push(ctx: Context, writer: LockedWriter, _config: WordCloudConfig) {
-    info!(target: "Plugin/WordCloud", "开始执行每日词云推送...");
-
-    // 1. 确定目标群列表
-    let (whitelist_mode, whitelist_ids) = {
-        let guard = ctx.config.read().unwrap();
-        (
-            guard.global_filter.enable_whitelist,
-            guard.global_filter.whitelist.clone(),
-        )
-    };
-
-    let groups_to_push: Vec<i64> = if whitelist_mode {
-        if whitelist_ids.is_empty() {
-            info!(target: "Plugin/WordCloud", "白名单模式已开启但列表为空，跳过推送。");
+// 保留原有的逻辑函数供 debug 调用
+async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCloudConfig) {
+    let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(target: "Plugin/WordCloud", "获取群列表失败: {}", e);
             return;
         }
-        whitelist_ids.into_iter().collect()
-    } else {
-        let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
-            Ok(list) => list,
-            Err(e) => {
-                warn!(target: "Plugin/WordCloud", "获取群列表失败: {}", e);
-                return;
-            }
-        };
-
-        if group_list.is_empty() {
-            info!(target: "Plugin/WordCloud", "群列表为空，跳过推送。");
-            return;
-        }
-
-        group_list.into_iter().map(|g| g.group_id).collect()
     };
 
     let (start_time, end_time) = get_time_range("今日");
 
-    // 2. 遍历群推送
-    for group_id in groups_to_push {
-        // 二次检查过滤规则 (防止配置变更，以及处理黑名单模式)
+    for g in group_list {
+        let gid = g.group_id;
+        // 简单过滤逻辑 (正式逻辑已移至 Scheduler)
         let should_skip = {
             let guard = ctx.config.read().unwrap();
-            let filter = &guard.global_filter;
-            if filter.enable_whitelist {
-                !filter.whitelist.contains(&group_id)
-            } else if filter.enable_blacklist {
-                filter.blacklist.contains(&group_id)
+            if guard.global_filter.enable_whitelist {
+                !guard.global_filter.whitelist.contains(&gid)
             } else {
-                false
+                guard.global_filter.blacklist.contains(&gid)
             }
         };
-
         if should_skip {
             continue;
         }
 
-        info!(target: "Plugin/WordCloud", "正在推送词云到群: {}", group_id);
-
-        let result = generate_and_send(
+        let _ = generate_and_send(
             &ctx,
             writer.clone(),
-            Some(&group_id.to_string()),
+            Some(&gid.to_string()),
             None,
             start_time,
             end_time,
-            Some(group_id),
+            Some(gid),
             None,
             None,
-            "本群今日词云 (每日推送)".to_string(),
+            "本群今日词云 (调试推送)".to_string(),
         )
         .await;
-
-        if let Err(e) = result {
-            warn!(target: "Plugin/WordCloud", "群 {} 推送失败: {}", group_id, e);
-        }
-
-        // 串行间隔，防止风控
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-
-    info!(target: "Plugin/WordCloud", "每日词云推送完成。");
 }
 
-/// 通用生成并发送逻辑
+// === 核心生成逻辑 ===
+
 #[allow(clippy::too_many_arguments)]
 async fn generate_and_send(
     ctx: &Context,
