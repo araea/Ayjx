@@ -4,7 +4,9 @@ use crate::config::build_config;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config, word_cloud};
+use crate::{info, warn};
+use chrono::Local;
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -216,16 +218,31 @@ pub fn on_connected(
 
         let scheduler = ctx.scheduler.clone();
 
+        // 调度综合日报推送
         scheduler.schedule_daily_push(
             ctx.clone(),
             writer.clone(),
-            "Stats",
+            "DailyReport",
             config.daily_push_time.clone(),
             move |c, w, gid| async move {
-                let title = "本群 今日 发言 排行榜 (每日推送)".to_string();
+                let date_str = Local::now().format("%Y-%m-%d").to_string();
                 let (start, end) = get_time_range("今日");
 
-                let res = chart::generate(
+                // 1. 发送提示文本
+                info!(target: "Plugin/Stats", "正在推送群 [{}] 日报...", gid);
+                let intro_text = format!("📅 [{}] 群数据日报\n📊 正在生成统计数据...", date_str);
+                let _ = send_msg(
+                    &c,
+                    w.clone(),
+                    Some(gid),
+                    None,
+                    Message::new().text(intro_text),
+                )
+                .await;
+
+                // 2. 生成并发送排行榜 (串行)
+                let rank_title = "本群 今日 发言 排行榜".to_string();
+                let rank_res = chart::generate(
                     &c,
                     false,
                     "发言",
@@ -235,16 +252,36 @@ pub fn on_connected(
                     0,
                     start,
                     end,
-                    &title,
+                    &rank_title,
                 )
                 .await;
 
-                if let Ok(b64) = res {
-                    let msg = Message::new().image(b64);
-                    let _ = send_msg(&c, w, Some(gid), None, msg).await;
-                } else if let Err(e) = res {
-                    warn!(target: "Plugin/Stats", "群 {} 推送生成失败: {}", gid, e);
+                match rank_res {
+                    Ok(b64) => {
+                        let _ = send_msg(&c, w.clone(), Some(gid), None, Message::new().image(b64))
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(target: "Plugin/Stats", "群 {} 排行榜生成失败: {}", gid, e);
+                    }
                 }
+
+                // 3. 生成并发送词云 (串行)
+                // 调用 word_cloud 模块的公共生成函数
+                let wc_res = word_cloud::generate_image(&c, Some(gid), None, start, end).await;
+
+                match wc_res {
+                    Ok(b64) => {
+                        let _ = send_msg(&c, w.clone(), Some(gid), None, Message::new().image(b64))
+                            .await;
+                    }
+                    Err(e) => {
+                        // 词云生成失败（如消息过少）是正常现象，仅记录日志不打扰群
+                        info!(target: "Plugin/Stats", "群 {} 词云未生成: {}", gid, e);
+                    }
+                }
+
+                // 任务结束，scheduler 会自动等待 x 秒后处理下一个群
             },
         );
 

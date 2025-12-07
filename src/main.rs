@@ -14,6 +14,7 @@ use crate::config::AppConfig;
 use crate::event::{BotStatus, Context, EventType};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::fs;
@@ -56,6 +57,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 动态合并插件默认配置
     let registered_plugins = plugins::get_plugins();
     let mut config_dirty = false;
+
+    // 清理无效配置：只保留注册过的插件配置
+    let valid_plugin_names: HashSet<&str> = registered_plugins.iter().map(|p| p.name).collect();
+    let unknown_keys: Vec<String> = app_config
+        .plugins
+        .keys()
+        .filter(|k| !valid_plugin_names.contains(k.as_str()))
+        .cloned()
+        .collect();
+
+    for key in unknown_keys {
+        info!("清理无效配置项: [{}]", key);
+        app_config.plugins.remove(&key);
+        config_dirty = true;
+    }
 
     for plugin in registered_plugins {
         let default_config = (plugin.default_config)();

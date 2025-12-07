@@ -1,4 +1,3 @@
-use crate::adapters::onebot::api;
 use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::db::queries::get_text_corpus;
@@ -6,7 +5,7 @@ use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
-use crate::{error, info, warn};
+use crate::{error, info};
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -89,23 +88,33 @@ pub fn handle(
                 return Ok(None);
             }
 
-            match generate_and_send(
+            let title = format!("{} 的 {} 词云", scope_str, time_str);
+            let reply_id = Some(msg.message_id());
+            let target_group = msg.group_id();
+            let target_user = Some(msg.user_id());
+
+            // 发送提示
+            let _ = send_msg(
                 &ctx,
-                writer,
-                query_group_id,
-                query_user_id,
-                start_time,
-                end_time,
-                msg.group_id(),
-                Some(msg.user_id()),
-                Some(msg.message_id()),
-                format!("{} 的 {} 词云", scope_str, time_str),
+                writer.clone(),
+                target_group,
+                target_user,
+                Message::new()
+                    .reply(reply_id.unwrap_or(0))
+                    .text(format!("正在生成 {}...", title)),
             )
-            .await
-            {
-                Ok(_) => {}
+            .await;
+
+            // 生成并发送
+            match generate_image(&ctx, query_group_id, query_user_id, start_time, end_time).await {
+                Ok(b64) => {
+                    let img_msg = Message::new().image(b64);
+                    let _ = send_msg(&ctx, writer, target_group, target_user, img_msg).await;
+                }
                 Err(e) => {
-                    error!(target: "Plugin/WordCloud", "Handler logic error: {}", e);
+                    let err_msg = Message::new().text(format!("生成失败: {}", e));
+                    let _ = send_msg(&ctx, writer, target_group, target_user, err_msg).await;
+                    error!(target: "Plugin/WordCloud", "Handler error: {}", e);
                 }
             }
 
@@ -116,170 +125,34 @@ pub fn handle(
     })
 }
 
-pub fn on_connected(
-    ctx: Context,
-    writer: LockedWriter,
-) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
-    Box::pin(async move {
-        let config: WordCloudConfig = get_config(&ctx, "word_cloud")
-            .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
-
-        if !config.daily_push_enabled {
-            return Ok(Some(ctx));
-        }
-
-        let scheduler = ctx.scheduler.clone();
-
-        // 调试模式
-        if config.debug_push_interval > 0 {
-            info!(target: "Plugin/WordCloud", "已开启词云调试推送，间隔: {}秒", config.debug_push_interval);
-            let ctx_debug = ctx.clone();
-            let writer_debug = writer.clone();
-            scheduler.add_interval(
-                std::time::Duration::from_secs(config.debug_push_interval),
-                move || {
-                    let c = ctx_debug.clone();
-                    let w = writer_debug.clone();
-                    async move {
-                        let cfg = WordCloudConfig {
-                            enabled: true,
-                            limit: 50,
-                            width: 800,
-                            height: 600,
-                            font_path: None,
-                            max_msg: 50000,
-                            daily_push_enabled: true,
-                            daily_push_time: "23:30:00".to_string(),
-                            debug_push_interval: 0,
-                        };
-                        do_daily_push_logic(c, w, cfg).await;
-                    }
-                },
-            );
-        } else {
-            // 正常每日推送
-            scheduler.schedule_daily_push(
-                ctx.clone(),
-                writer.clone(),
-                "WordCloud",
-                config.daily_push_time.clone(),
-                move |c, w, gid| async move {
-                    let (start_time, end_time) = get_time_range("今日");
-                    let result = generate_and_send(
-                        &c,
-                        w,
-                        Some(gid),
-                        None,
-                        start_time,
-                        end_time,
-                        Some(gid),
-                        None,
-                        None,
-                        "本群今日词云 (每日推送)".to_string(),
-                    )
-                    .await;
-
-                    if let Err(e) = result {
-                        warn!(target: "Plugin/WordCloud", "群 {} 推送失败: {}", gid, e);
-                    }
-                },
-            );
-        }
-
-        Ok(Some(ctx))
-    })
-}
-
-async fn do_daily_push_logic(ctx: Context, writer: LockedWriter, _config: WordCloudConfig) {
-    let group_list = match api::get_group_list(&ctx, writer.clone(), false).await {
-        Ok(list) => list,
-        Err(e) => {
-            warn!(target: "Plugin/WordCloud", "获取群列表失败: {}", e);
-            return;
-        }
-    };
-
-    let (start_time, end_time) = get_time_range("今日");
-
-    for g in group_list {
-        let gid = g.group_id;
-        let should_skip = {
-            let guard = ctx.config.read().unwrap();
-            if guard.global_filter.enable_whitelist {
-                !guard.global_filter.whitelist.contains(&gid)
-            } else {
-                guard.global_filter.blacklist.contains(&gid)
-            }
-        };
-        if should_skip {
-            continue;
-        }
-
-        let _ = generate_and_send(
-            &ctx,
-            writer.clone(),
-            Some(gid),
-            None,
-            start_time,
-            end_time,
-            Some(gid),
-            None,
-            None,
-            "本群今日词云 (调试推送)".to_string(),
-        )
-        .await;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn generate_and_send(
+/// 核心生成逻辑供外部调用 (例如综合日报插件)
+pub async fn generate_image(
     ctx: &Context,
-    writer: LockedWriter,
     query_group_id: Option<i64>,
     query_user_id: Option<i64>,
     start_time: i64,
     end_time: i64,
-    target_group_id: Option<i64>,
-    target_user_id: Option<i64>,
-    reply_msg_id: Option<i64>,
-    title: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let config: WordCloudConfig = get_config(ctx, "word_cloud")
         .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
+    if !config.enabled {
+        return Err("词云插件未启用".to_string());
+    }
+
     let db = &ctx.db;
-    let corpus_result =
-        get_text_corpus(db, query_group_id, query_user_id, start_time, end_time).await;
+    let mut corpus = get_text_corpus(db, query_group_id, query_user_id, start_time, end_time)
+        .await
+        .map_err(|e| format!("DB Error: {}", e))?;
 
-    let mut corpus = match corpus_result {
-        Ok(c) if c.is_empty() => {
-            if reply_msg_id.is_none() {
-                return Ok(());
-            }
-            let reply =
-                Message::new().text(format!("生成失败：{} 范围内没有足够的消息记录。", title));
-            let _ = send_msg(ctx, writer, target_group_id, target_user_id, reply).await;
-            return Ok(());
-        }
-        Ok(c) => c,
-        Err(e) => return Err(format!("DB Error: {}", e)),
-    };
+    if corpus.is_empty() {
+        return Err("该时间段内没有足够的聊天记录".to_string());
+    }
 
+    // 截断过多消息
     if config.max_msg > 0 && corpus.len() > config.max_msg {
         let start = corpus.len().saturating_sub(config.max_msg);
         corpus = corpus.split_off(start);
-    }
-
-    if let Some(msg_id) = reply_msg_id {
-        let _reply_prefix = format!("正在生成 {}，样本数: {}...", title, corpus.len());
-        let _ = send_msg(
-            ctx,
-            writer.clone(),
-            target_group_id,
-            target_user_id,
-            Message::new().reply(msg_id).text(_reply_prefix),
-        )
-        .await;
     }
 
     let font_path = config.font_path.clone();
@@ -287,24 +160,14 @@ async fn generate_and_send(
     let width = config.width;
     let height = config.height;
 
-    let final_msg = tokio::task::spawn_blocking(move || {
+    // 在阻塞线程中生成图片
+    let task_result = tokio::task::spawn_blocking(move || {
         image::generate_word_cloud(corpus, font_path, limit, width, height)
     })
     .await;
 
-    match final_msg {
-        Ok(Ok(base64_image)) => {
-            let img_msg = Message::new().image(base64_image);
-            let _ = send_msg(ctx, writer, target_group_id, target_user_id, img_msg).await;
-            Ok(())
-        }
-        Ok(Err(e)) => {
-            if reply_msg_id.is_some() {
-                let reply = Message::new().text(format!("生成词云出错: {}", e));
-                let _ = send_msg(ctx, writer, target_group_id, target_user_id, reply).await;
-            }
-            Err(e)
-        }
+    match task_result {
+        Ok(res) => res,
         Err(e) => Err(format!("Task Join Error: {}", e)),
     }
 }

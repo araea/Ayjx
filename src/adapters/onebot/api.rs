@@ -47,8 +47,8 @@ where
     let json_str = simd_json::to_string(&req)?;
 
     // 注册监听
-    // 默认超时 10 秒
-    let wait_future = ctx.matcher.wait_resp(echo, Duration::from_secs(10));
+    // 默认超时 60 秒 (上传文件可能较慢)
+    let wait_future = ctx.matcher.wait_resp(echo, Duration::from_secs(60));
 
     // 发送请求
     send_frame_raw(writer, json_str).await?;
@@ -308,4 +308,75 @@ pub async fn get_group_list(
         },
     )
     .await
+}
+
+// --- upload_file (group/private) ---
+
+#[derive(Serialize)]
+struct UploadFileParams<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<i64>,
+    file: &'a str,
+    name: &'a str,
+}
+
+pub async fn upload_file(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    file: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    let action = if group_id.is_some() {
+        "upload_group_file"
+    } else {
+        "upload_private_file"
+    };
+
+    let params = UploadFileParams {
+        group_id,
+        user_id,
+        file,
+        name,
+    };
+
+    // 文件上传通常无需关心返回的 data 内容，只要 retcode=0 即可
+    call_action::<_, simd_json::OwnedValue>(ctx, writer, action, params).await?;
+    Ok(())
+}
+
+// --- send_forward_msg (group/private) ---
+
+#[derive(Serialize)]
+struct SendForwardMsgParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<i64>,
+    messages: Message,
+}
+
+pub async fn send_forward_msg(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    messages: Message,
+) -> Result<simd_json::OwnedValue, ApiError> {
+    let action = if group_id.is_some() {
+        "send_group_forward_msg"
+    } else {
+        "send_private_forward_msg"
+    };
+
+    let params = SendForwardMsgParams {
+        group_id,
+        user_id,
+        messages,
+    };
+
+    call_action(ctx, writer, action, params).await
 }

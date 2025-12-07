@@ -15,14 +15,6 @@ pub struct WordCloudConfig {
     pub font_path: Option<String>,
     #[serde(default = "default_max_msg")]
     pub max_msg: usize,
-
-    // === 每日推送 ===
-    #[serde(default)]
-    pub daily_push_enabled: bool,
-    #[serde(default = "default_daily_push_time")]
-    pub daily_push_time: String, // 格式 "HH:MM:SS"
-    #[serde(default)]
-    pub debug_push_interval: u64, // 调试用：如果不为0，则按此秒数间隔推送
 }
 
 fn default_limit() -> usize {
@@ -41,10 +33,6 @@ fn default_max_msg() -> usize {
     50000
 }
 
-fn default_daily_push_time() -> String {
-    "23:30:00".to_string()
-}
-
 pub fn default_config() -> Value {
     build_config(WordCloudConfig {
         enabled: true,
@@ -53,8 +41,5 @@ pub fn default_config() -> Value {
         height: 600,
         font_path: None,
         max_msg: 50000,
-        daily_push_enabled: false,
-        daily_push_time: "23:30:00".to_string(),
-        debug_push_interval: 0,
     })
 }

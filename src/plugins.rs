@@ -11,15 +11,20 @@ use std::sync::{Arc, OnceLock};
 use tokio::fs;
 use toml::Value;
 
+pub mod card_reader;
 pub mod echo;
 pub mod filter_meta_event;
+pub mod gif_lab;
 pub mod group_self_title;
+pub mod image_splitter;
 pub mod logger;
+pub mod media_transfer;
 pub mod ping_pong;
 pub mod recall;
 pub mod recorder;
 pub mod repeater;
 pub mod stats_visualizer;
+pub mod sticker_saver;
 pub mod word_cloud;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
@@ -66,6 +71,20 @@ pub fn get_plugins() -> &'static [Plugin] {
                 default_config: recorder::default_config,
             },
             Plugin {
+                name: "media_transfer",
+                handler: media_transfer::handle,
+                on_init: None,
+                on_connected: None,
+                default_config: media_transfer::default_config,
+            },
+            Plugin {
+                name: "sticker_saver",
+                handler: sticker_saver::handle,
+                on_init: None,
+                on_connected: None,
+                default_config: sticker_saver::default_config,
+            },
+            Plugin {
                 name: "group_self_title",
                 handler: group_self_title::handle,
                 on_init: None,
@@ -104,7 +123,8 @@ pub fn get_plugins() -> &'static [Plugin] {
                 name: "word_cloud",
                 handler: word_cloud::handle,
                 on_init: None,
-                on_connected: Some(word_cloud::on_connected),
+                // 将 on_connected 置空，每日推送逻辑已移交至 stats_visualizer
+                on_connected: None,
                 default_config: word_cloud::default_config,
             },
             Plugin {
@@ -113,6 +133,27 @@ pub fn get_plugins() -> &'static [Plugin] {
                 on_init: None,
                 on_connected: Some(stats_visualizer::on_connected),
                 default_config: stats_visualizer::default_config,
+            },
+            Plugin {
+                name: "card_reader",
+                handler: card_reader::handle,
+                on_init: None,
+                on_connected: None,
+                default_config: card_reader::default_config,
+            },
+            Plugin {
+                name: "gif_lab",
+                handler: gif_lab::handle,
+                on_init: None,
+                on_connected: None,
+                default_config: gif_lab::default_config,
+            },
+            Plugin {
+                name: "image_splitter",
+                handler: image_splitter::handle,
+                on_init: None,
+                on_connected: None,
+                default_config: image_splitter::default_config,
             },
         ]
     })
