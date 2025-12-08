@@ -29,10 +29,12 @@ pub struct BotStatus {
 }
 
 /// 统一的上下文，包含事件数据、可变配置和任务调度器
-/// 新增 Clone 以便于在闭包和异步任务中传递
+/// 注意：event 字段直接持有 EventType，支持在插件链中移交所有权从而实现修改。
+/// Context 实现了 Clone（因为 EventType 包含的 simd_json::OwnedValue 实现了 Clone），
+/// 但在插件流水线中通常通过 Move 传递，避免了 Deep Copy。
 #[derive(Clone)]
 pub struct Context {
-    pub event: EventType,
+    pub event: EventType, // 直接持有，不再使用 Arc
     pub config: Arc<RwLock<AppConfig>>,
     pub config_save_lock: Arc<AsyncMutex<()>>,
     pub db: DatabaseConnection,

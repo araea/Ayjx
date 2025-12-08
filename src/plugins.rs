@@ -5,7 +5,6 @@ use crate::event::{BotStatus, Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::fs;
@@ -103,32 +102,46 @@ pub fn register_plugins() -> &'static [Plugin] {
 pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
-    // 先计算启用的插件，以便输出统计信息
-    let enabled_plugins: HashSet<String> = {
+    let enabled_count = {
         let guard = ctx.config.read().unwrap();
-        guard
-            .plugins
+        plugins
             .iter()
-            .filter(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false))
-            .map(|(k, _)| k.clone())
-            .collect()
+            .filter(|p| {
+                guard
+                    .plugins
+                    .get(p.name)
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+            })
+            .count()
     };
 
     info!(
         target: "System",
         "正在加载插件系统 (已启用 {}/{})",
-        enabled_plugins.len(),
+        enabled_count,
         plugins.len()
     );
 
     for plugin in plugins {
-        if !enabled_plugins.contains(plugin.name) {
+        let is_enabled = {
+            let guard = ctx.config.read().unwrap();
+            guard
+                .plugins
+                .get(plugin.name)
+                .and_then(|v| v.get("enabled"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+        };
+
+        if !is_enabled {
             continue;
         }
 
         if let Some(init_fn) = plugin.on_init {
             let init_ctx = Context {
-                event: EventType::Init,
+                event: EventType::Init, // 移除 Arc
                 config: ctx.config.clone(),
                 config_save_lock: ctx.config_save_lock.clone(),
                 db: ctx.db.clone(),
@@ -161,18 +174,19 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
 /// 当 Bot 连接建立后触发（用于注册定时任务或主动操作）
 pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
-    let enabled_plugins: HashSet<String> = {
-        let guard = ctx.config.read().unwrap();
-        guard
-            .plugins
-            .iter()
-            .filter(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false))
-            .map(|(k, _)| k.clone())
-            .collect()
-    };
 
     for plugin in plugins {
-        if !enabled_plugins.contains(plugin.name) {
+        let is_enabled = {
+            let guard = ctx.config.read().unwrap();
+            guard
+                .plugins
+                .get(plugin.name)
+                .and_then(|v| v.get("enabled"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+        };
+
+        if !is_enabled {
             continue;
         }
 
@@ -191,21 +205,24 @@ pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), Plug
 pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
-    let enabled_plugins: HashSet<String> = {
-        let config_guard = ctx.config.read().unwrap();
-        config_guard
-            .plugins
-            .iter()
-            .filter(|(_, v)| v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false))
-            .map(|(k, _)| k.clone())
-            .collect()
-    };
-
     for plugin in plugins {
-        if !enabled_plugins.contains(plugin.name) {
+        // 直接在循环内获取读锁进行轻量检查，避免为每个事件创建 HashSet
+        let is_enabled = {
+            let config_guard = ctx.config.read().unwrap();
+            config_guard
+                .plugins
+                .get(plugin.name)
+                .and_then(|v| v.get("enabled"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+        };
+
+        if !is_enabled {
             continue;
         }
 
+        // ctx 在这里 Move 进 handler，若插件返回 Some(ctx) 则接力给下一个插件
+        // 这样插件拥有 Context 的所有权，可以修改 Context.event 中的内容
         match (plugin.handler)(ctx, writer.clone()).await? {
             Some(next_ctx) => {
                 ctx = next_ctx;
@@ -214,7 +231,8 @@ pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginErr
         }
     }
 
-    match ctx.event {
+    // 注意：ctx.event 现在是 EventType，可以直接 match 引用
+    match &ctx.event {
         EventType::Onebot(_) => {}
         EventType::BeforeSend(packet) => {
             let json_str = simd_json::to_string(&packet)?;
@@ -235,7 +253,7 @@ pub async fn send_fake_event(
     event: Event,
 ) -> Result<(), PluginError> {
     let new_ctx = Context {
-        event: EventType::Onebot(event),
+        event: EventType::Onebot(event), // 移除 Arc
         config: ctx.config.clone(),
         config_save_lock: ctx.config_save_lock.clone(),
         db: ctx.db.clone(),

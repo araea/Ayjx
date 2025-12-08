@@ -229,8 +229,9 @@ pub fn handle(
             ..Default::default()
         };
 
-        // 用于接收计算出的纯文本长度
+        // 用于接收计算出的纯文本长度和待分词文本
         let mut text_len = 0;
+        let mut raw_text_for_tokens = String::new();
 
         let should_insert = match &ctx.event {
             // === 接收消息 ===
@@ -280,8 +281,10 @@ pub fn handle(
 
                 // 4. 消息内容
                 let msg_val = ev.get("message");
-                // 解析富文本，填充 content_rich 和 tokens
-                text_len = parse_message_content(msg_val, &mut record);
+                // 解析富文本，填充 content_rich 和获取待分词文本
+                let (len, raw) = parse_message_content(msg_val, &mut record);
+                text_len = len;
+                raw_text_for_tokens = raw;
 
                 true
             }
@@ -329,7 +332,9 @@ pub fn handle(
 
                 let msg_val = packet.message();
 
-                text_len = parse_message_content(msg_val, &mut record);
+                let (len, raw) = parse_message_content(msg_val, &mut record);
+                text_len = len;
+                raw_text_for_tokens = raw;
 
                 true
             }
@@ -351,6 +356,18 @@ pub fn handle(
             // 计算长度 (仅统计文本消息的字符数)
             record.length = Set(text_len);
 
+            if !raw_text_for_tokens.is_empty() {
+                let tokens = tokio::task::spawn_blocking(move || {
+                    let jieba = get_jieba();
+                    jieba.cut(&raw_text_for_tokens, false).join(" ")
+                })
+                .await
+                .unwrap_or_default();
+                record.tokens = Set(tokens);
+            } else {
+                record.tokens = Set("".to_string());
+            }
+
             if let Err(e) = record.insert(&ctx.db).await {
                 error!(target: "Plugin/Recorder", "消息记录失败: {}", e);
             }
@@ -360,8 +377,11 @@ pub fn handle(
     })
 }
 
-/// 解析消息段数组，提取富文本摘要、特征标记以及生成分词，并返回纯文本字符个数
-fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActiveModel) -> i32 {
+/// 解析消息段数组，提取富文本摘要、特征标记，并返回 (纯文本长度, 拼接后的纯文本)
+fn parse_message_content(
+    msg_val: Option<&OwnedValue>,
+    record: &mut RecordActiveModel,
+) -> (i32, String) {
     let mut rich_text = String::new();
     // 存储分段的纯文本，用于最终拼接 tokens
     let mut text_segments: Vec<String> = Vec::new();
@@ -480,16 +500,8 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
 
     record.content_rich = Set(rich_text);
 
-    // 拼接纯文本并进行分词
+    // 拼接纯文本
     let joined_text = text_segments.join(" ");
-
-    if !joined_text.is_empty() {
-        let jieba = get_jieba();
-        let tokens = jieba.cut(&joined_text, false);
-        record.tokens = Set(tokens.join(" "));
-    } else {
-        record.tokens = Set("".to_string());
-    }
 
     record.has_image = Set(image_count > 0);
     record.has_at = Set(at_count > 0);
@@ -506,5 +518,5 @@ fn parse_message_content(msg_val: Option<&OwnedValue>, record: &mut RecordActive
     record.is_poke = Set(is_poke);
     record.is_forward = Set(is_forward);
 
-    text_char_count as i32
+    (text_char_count as i32, joined_text)
 }

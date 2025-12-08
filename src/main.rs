@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // === 触发插件初始化钩子 (生命周期: init) ===
     let init_ctx = Context {
-        event: EventType::Init,
+        event: EventType::Init, // 直接传入，不使用 Arc
         config: shared_config.clone(),
         config_save_lock: save_lock.clone(),
         db: db.clone(),
