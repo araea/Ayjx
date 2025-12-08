@@ -13,7 +13,7 @@ use crate::plugins::ciyi::entity::{record as record_entity, state as state_entit
 use crate::plugins::{PluginError, get_config};
 use futures_util::future::BoxFuture;
 use sea_orm::{ConnectionTrait, Schema};
-use simd_json::derived::ValueObjectAccessAsScalar;
+use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
 pub fn default_config() -> Value {
@@ -126,7 +126,8 @@ pub fn handle(
                             let arg = cmd
                                 .args
                                 .first()
-                                .and_then(|seg| seg.get_str("text"))
+                                .and_then(|seg| seg.get("data"))
+                                .and_then(|d| d.get_str("text"))
                                 .unwrap_or("")
                                 .trim();
                             if arg.chars().count() != 2 {
