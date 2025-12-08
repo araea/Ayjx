@@ -4,7 +4,8 @@ use crate::plugins::get_data_dir;
 use sea_orm::ActiveValue::Set;
 use sea_orm::QuerySelect;
 use sea_orm::Schema;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryOrder};
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, QueryOrder};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::fs;
@@ -231,45 +232,43 @@ impl Storage {
         user_name: &str,
         shindan_id: &str,
     ) {
-        // Update User
-        let user_entry = user_stats::Entity::find_by_id(user_id)
-            .one(db)
-            .await
-            .ok()
-            .flatten();
-        let user_active = if let Some(u) = user_entry {
-            let mut active: user_stats::ActiveModel = u.into();
-            active.count = Set(active.count.unwrap() + 1);
-            active.name = Set(user_name.to_string());
-            active
-        } else {
-            user_stats::ActiveModel {
-                user_id: Set(user_id),
-                name: Set(user_name.to_string()),
-                count: Set(1),
-            }
+        // Upsert User: 如果不存在则插入1，如果存在(冲突)则 count+1，并更新 name
+        let user_active = user_stats::ActiveModel {
+            user_id: Set(user_id),
+            name: Set(user_name.to_string()),
+            count: Set(1),
         };
-        if let Err(e) = user_active.save(db).await {
+
+        let user_upsert = user_stats::Entity::insert(user_active).on_conflict(
+            OnConflict::column(user_stats::Column::UserId)
+                .update_column(user_stats::Column::Name)
+                .value(
+                    user_stats::Column::Count,
+                    Expr::col(user_stats::Column::Count).add(1),
+                )
+                .to_owned(),
+        );
+
+        if let Err(e) = user_upsert.exec(db).await {
             error!(target: "Shindan", "保存用户统计失败: {}", e);
         }
 
-        // Update Item
-        let item_entry = item_stats::Entity::find_by_id(shindan_id)
-            .one(db)
-            .await
-            .ok()
-            .flatten();
-        let item_active = if let Some(i) = item_entry {
-            let mut active: item_stats::ActiveModel = i.into();
-            active.count = Set(active.count.unwrap() + 1);
-            active
-        } else {
-            item_stats::ActiveModel {
-                shindan_id: Set(shindan_id.to_string()),
-                count: Set(1),
-            }
+        // Upsert Item: 如果不存在则插入1，如果存在(冲突)则 count+1
+        let item_active = item_stats::ActiveModel {
+            shindan_id: Set(shindan_id.to_string()),
+            count: Set(1),
         };
-        if let Err(e) = item_active.save(db).await {
+
+        let item_upsert = item_stats::Entity::insert(item_active).on_conflict(
+            OnConflict::column(item_stats::Column::ShindanId)
+                .value(
+                    item_stats::Column::Count,
+                    Expr::col(item_stats::Column::Count).add(1),
+                )
+                .to_owned(),
+        );
+
+        if let Err(e) = item_upsert.exec(db).await {
             error!(target: "Shindan", "保存神断统计失败: {}", e);
         }
     }

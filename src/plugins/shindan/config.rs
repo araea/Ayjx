@@ -6,10 +6,6 @@ pub struct PluginConfig {
     #[serde(default)]
     pub domain: String, // "Jp", "Cn" 等
     #[serde(default = "default_true")]
-    pub is_at: bool, // 回复时是否 At
-    #[serde(default)]
-    pub is_quote: bool, // 回复时是否引用
-    #[serde(default = "default_true")]
     pub random_return_command: bool,
     #[serde(default = "default_rank_max")]
     pub rank_max: u32,
@@ -27,8 +23,6 @@ impl Default for PluginConfig {
         Self {
             enabled: true,
             domain: "Jp".to_string(),
-            is_at: true,
-            is_quote: false,
             random_return_command: true,
             rank_max: 20,
         }

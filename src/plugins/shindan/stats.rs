@@ -13,15 +13,12 @@ pub async fn handle_user_count(
     args: &[OwnedValue],
     storage: &Storage,
 ) -> Result<()> {
-    // 尝试解析 AT 或 参数
-    // 如果没有参数，查自己
     let target_id = if let Some(qq) = get_at_target(args) {
         qq
     } else if let Some(p) = params.first() {
         if let Ok(id) = p.parse::<i64>() {
             id
         } else {
-            // 尝试通过名字查? 数据库没存映射，这里简化为只查自己
             ctx.as_message().unwrap().user_id()
         }
     } else {
@@ -29,12 +26,7 @@ pub async fn handle_user_count(
     };
 
     let count = storage.get_user_count(&ctx.db, target_id).await;
-    reply_text(
-        ctx,
-        writer,
-        &format!("用户 {} 神断次数: {}", target_id, count),
-    )
-    .await?;
+    reply_text(ctx, writer, &format!("神断次数: {}", count)).await?;
     Ok(())
 }
 
@@ -81,7 +73,6 @@ pub async fn handle_item_rank(
         return Ok(());
     }
 
-    // 需要把 ID 换成 Command 显示更友好，这里需要从 Storage 反查
     let shindans = storage.get_shindans();
 
     let mut msg = String::from("神断热度榜:\n");

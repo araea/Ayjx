@@ -1,6 +1,7 @@
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::event::Context;
+use crate::message::Message;
 use anyhow::Result;
 use shindan_maker::ShindanDomain;
 
@@ -78,20 +79,51 @@ pub async fn handle_del(
 }
 
 pub async fn handle_list(ctx: &Context, writer: LockedWriter, storage: &Storage) -> Result<()> {
-    let list = storage.get_shindans();
+    let mut list = storage.get_shindans();
     if list.is_empty() {
         reply_text(ctx, writer, "列表为空").await?;
         return Ok(());
     }
 
-    // 提取命令列表
-    let commands: Vec<&str> = list.iter().map(|s| s.command.as_str()).collect();
+    // 按命令排序
+    list.sort_by(|a, b| a.command.cmp(&b.command));
 
-    // 分页发送，每页 200 个命令，空格分隔
-    for chunk in commands.chunks(200) {
-        let msg = chunk.join(" ");
-        reply_text(ctx, writer.clone(), &msg).await?;
+    // 构建合并转发消息
+    let mut forward_msg = Message::new();
+    let bot_id = ctx.bot.login_user.id.parse::<i64>().unwrap_or(10000);
+    let bot_name = ctx
+        .bot
+        .login_user
+        .name
+        .clone()
+        .unwrap_or_else(|| "System Bot".to_string());
+
+    // 分页处理
+    for chunk in list.chunks(200) {
+        let mut text = String::new();
+        // 仅在第一个节点添加标题
+        if text.is_empty() && forward_msg.0.is_empty() {
+            text.push_str("=== 神断列表 ===\n");
+        }
+
+        for s in chunk {
+            text.push_str(&format!("{} ", s.command));
+        }
+
+        let node = Message::new().text(text);
+        forward_msg = forward_msg.node_custom(bot_id, &bot_name, node);
     }
+
+    let msg_evt = ctx.as_message().unwrap();
+    send_msg(
+        ctx,
+        writer,
+        msg_evt.group_id(),
+        Some(msg_evt.user_id()),
+        forward_msg,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))?;
 
     Ok(())
 }

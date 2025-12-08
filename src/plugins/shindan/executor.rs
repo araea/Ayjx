@@ -158,14 +158,10 @@ async fn execute_shindan(
         match fetch_segments(domain, &shindan.id, &target_name).await {
             Ok(segments) => {
                 let mut msg = Message::new();
-                if config.is_quote {
-                    msg = msg.reply(msg_evt.message_id());
-                }
-                if config.is_at {
-                    msg = msg.at(sender_id).text("\n");
-                }
                 if config.random_return_command {
-                    msg = msg.text(format!("『{}』\n", shindan.command));
+                    msg = msg
+                        .at(sender_id)
+                        .text(format!("\n『{}』\n", shindan.command));
                 }
 
                 // Convert segments
@@ -195,6 +191,24 @@ async fn execute_shindan(
             }
         }
     } else {
+        if config.random_return_command {
+            let mut msg = Message::new();
+            msg = msg.reply(msg_evt.message_id()).text(&shindan.command);
+            match send_msg(
+                ctx,
+                writer.clone(),
+                msg_evt.group_id(),
+                Some(sender_id),
+                msg,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e));
+                }
+            }
+        }
         // Image Mode
         match fetch_html(domain, &shindan.id, &target_name).await {
             Ok(html) => {
@@ -208,8 +222,7 @@ async fn execute_shindan(
 
                 let final_height = page_height.clamp(100, 5000);
                 // Viewport setup
-                tab.set_viewport(&Viewport::new(1200, final_height).with_device_scale_factor(2.0))
-                    .await?;
+                tab.set_viewport(&Viewport::new(1200, final_height)).await?;
                 tab.set_content(&html).await?;
 
                 // Check chart.js logic (from original)
@@ -222,12 +235,7 @@ async fn execute_shindan(
                 let _ = tab.close().await;
 
                 let mut msg = Message::new();
-                if config.is_quote {
-                    msg = msg.reply(msg_evt.message_id());
-                }
-                if config.random_return_command {
-                    msg = msg.text(format!("『{}』\n", shindan.command));
-                }
+
                 msg = msg.image(format!("base64://{}", b64));
 
                 match send_msg(ctx, writer, msg_evt.group_id(), Some(sender_id), msg).await {
