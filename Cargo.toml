@@ -39,3 +39,4 @@ plotters = "0.3"
 base64 = "0.22"
 chrono = "0.4"
 rand = "0.9"
+shindan-maker = { version = "0.1", features = ["full"] }

@@ -17,15 +17,13 @@ use toml::Value;
 
 // ================= Config =================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ChannelConfig {
     #[serde(default)]
     pub white: Vec<i64>,
     #[serde(default)]
     pub black: Vec<i64>,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -57,9 +55,19 @@ pub fn default_config() -> Value {
 
 // ================= Core Logic =================
 
-async fn capture_url(url: &str, config: &Config) -> Result<String> {
+async fn capture_url(url: &str, config: &Config, browser_path: Option<String>) -> Result<String> {
     // 使用框架提供的全局浏览器实例
-    let browser = Browser::instance().await;
+    // 优先使用传入的路径（来自全局配置），若为空则使用默认查找
+    let browser = if let Some(path) = browser_path {
+        if !path.is_empty() {
+            Browser::instance_with_path(path).await
+        } else {
+            Browser::instance().await
+        }
+    } else {
+        Browser::instance().await
+    };
+
     let tab = browser.new_tab().await?;
 
     let initial_viewport = Viewport::new(config.viewport_width, 800)
@@ -162,6 +170,9 @@ pub fn handle(
             serde_json::from_value(serde_json::to_value(val).unwrap()).unwrap()
         });
 
+        // 获取全局浏览器路径配置
+        let browser_path = ctx.config.read().unwrap().browser_path.clone();
+
         // 检查群组黑白名单
         let group_id = msg_event.group_id();
         if !should_process(group_id, &config.channel.white, &config.channel.black) {
@@ -219,7 +230,7 @@ pub fn handle(
             // 执行截图
             info!(target: "WebShot", "Capturing: {}", url);
 
-            match capture_url(&url, &config).await {
+            match capture_url(&url, &config, browser_path).await {
                 Ok(base64_img) => {
                     let msg = Message::new()
                         .reply(msg_event.message_id())

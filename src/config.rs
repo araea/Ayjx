@@ -9,6 +9,10 @@ pub struct AppConfig {
     #[serde(default = "default_prefix")]
     pub command_prefix: Vec<String>,
 
+    // 全局浏览器路径配置 (默认为空，即自动查找)
+    #[serde(default)]
+    pub browser_path: Option<String>,
+
     // 全局频道过滤配置
     #[serde(default)]
     pub global_filter: GlobalFilterConfig,
@@ -95,6 +99,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             command_prefix: default_prefix(),
+            browser_path: None,
             global_filter: GlobalFilterConfig::default(),
             bots: default_bots(),
             plugins: HashMap::new(),

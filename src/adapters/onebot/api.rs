@@ -347,36 +347,3 @@ pub async fn upload_file(
     call_action::<_, simd_json::OwnedValue>(ctx, writer, action, params).await?;
     Ok(())
 }
-
-// --- send_forward_msg (group/private) ---
-
-#[derive(Serialize)]
-struct SendForwardMsgParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    group_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user_id: Option<i64>,
-    messages: Message,
-}
-
-pub async fn send_forward_msg(
-    ctx: &Context,
-    writer: LockedWriter,
-    group_id: Option<i64>,
-    user_id: Option<i64>,
-    messages: Message,
-) -> Result<simd_json::OwnedValue, ApiError> {
-    let action = if group_id.is_some() {
-        "send_group_forward_msg"
-    } else {
-        "send_private_forward_msg"
-    };
-
-    let params = SendForwardMsgParams {
-        group_id,
-        user_id,
-        messages,
-    };
-
-    call_action(ctx, writer, action, params).await
-}

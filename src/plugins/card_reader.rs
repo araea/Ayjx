@@ -93,13 +93,8 @@ pub fn handle(
         let config: Config = get_config(&ctx, "card_reader")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
-        if !config.enabled {
-            return Ok(Some(ctx));
-        }
-
         for cmd in &config.commands {
             if let Some(matched) = match_command(&ctx, cmd) {
-                // 开始处理
                 let img_url = match get_image_url(
                     &ctx,
                     writer.clone(),

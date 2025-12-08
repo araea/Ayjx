@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -272,5 +272,5 @@ async fn send_forward_msg(ctx: &Context, writer: LockedWriter, base64_list: Vec<
     }
 
     // 调用通用 API
-    let _ = api::send_forward_msg(ctx, writer, group_id, Some(user_id), forward_msg).await;
+    let _ = send_msg(ctx, writer, group_id, Some(user_id), forward_msg).await;
 }

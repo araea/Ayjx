@@ -67,9 +67,10 @@ pub fn handle(
                 let mut args_text = String::new();
                 for seg in &matched.args {
                     if seg.get_str("type") == Some("text")
-                        && let Some(t) = seg.get("data").and_then(|d| d.get_str("text")) {
-                            args_text.push_str(t);
-                        }
+                        && let Some(t) = seg.get("data").and_then(|d| d.get_str("text"))
+                    {
+                        args_text.push_str(t);
+                    }
                 }
                 let args_text = args_text.trim();
 
@@ -204,7 +205,7 @@ pub fn handle(
                             );
                         }
 
-                        if let Err(e) = api::send_forward_msg(
+                        if let Err(e) = send_msg(
                             &ctx,
                             writer.clone(),
                             msg.group_id(),

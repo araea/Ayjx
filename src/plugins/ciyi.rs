@@ -87,14 +87,6 @@ pub fn handle(
 
         let config: CiYiConfig = get_config(&ctx, "ciyi").unwrap_or_default();
 
-        if config.channel.black.contains(&group_id.to_string()) {
-            return Ok(Some(ctx));
-        }
-        if !config.channel.white.is_empty() && !config.channel.white.contains(&group_id.to_string())
-        {
-            return Ok(Some(ctx));
-        }
-
         // A. 直接猜测模式 (两个字)
         if text.chars().count() == 2 {
             let should_direct_guess =

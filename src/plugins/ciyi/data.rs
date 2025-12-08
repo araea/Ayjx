@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-const ALL_WORDS_JSON: &str = include_str!("../../../res/all_words.json");
-const QUESTION_WORDS_JSON: &str = include_str!("../../../res/question_words.json");
+const ALL_WORDS_JSON: &str = include_str!("../../../res/ciyi/all_words.json");
+const QUESTION_WORDS_JSON: &str = include_str!("../../../res/ciyi/question_words.json");
 
 static ALL_WORDS: OnceLock<HashSet<String>> = OnceLock::new();
 static QUESTION_WORDS: OnceLock<Vec<String>> = OnceLock::new();

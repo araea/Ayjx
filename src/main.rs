@@ -14,6 +14,7 @@ use crate::config::AppConfig;
 use crate::event::{BotStatus, Context, EventType};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
+use cdp_html_shot::Browser;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -106,6 +107,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if config_dirty {
             info!("配置文件已更新。");
         }
+    }
+
+    // 初始化全局浏览器实例
+    if let Some(ref path) = app_config.browser_path {
+        if !path.is_empty() {
+            info!("正在使用自定义路径启动浏览器: {}", path);
+            let _ = Browser::instance_with_path(path).await;
+        } else {
+            info!("正在启动浏览器 (自动检测路径)...");
+            let _ = Browser::instance().await;
+        }
+    } else {
+        info!("正在启动浏览器 (自动检测路径)...");
+        let _ = Browser::instance().await;
     }
 
     // 构建运行时组件

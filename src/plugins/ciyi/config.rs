@@ -1,13 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct ChannelConfig {
-    #[serde(default)]
-    pub white: Vec<String>,
-    #[serde(default)]
-    pub black: Vec<String>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginConfig {
     #[serde(default)]
@@ -46,8 +38,6 @@ fn default_rank_display() -> usize {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CiYiConfig {
-    #[serde(default)]
-    pub channel: ChannelConfig,
     #[serde(default)]
     pub plugin: PluginConfig,
 }

@@ -93,6 +93,9 @@ register_plugins!(
         on_init: Some(ciyi::init)
     },
     web_shot,
+    shindan {
+        on_init: Some(shindan::init)
+    }
 );
 
 pub fn register_plugins() -> &'static [Plugin] {
