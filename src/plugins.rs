@@ -91,7 +91,8 @@ register_plugins!(
     image_splitter,
     ciyi {
         on_init: Some(ciyi::init)
-    }
+    },
+    web_shot,
 );
 
 pub fn register_plugins() -> &'static [Plugin] {
@@ -253,7 +254,7 @@ pub async fn send_fake_event(
     event: Event,
 ) -> Result<(), PluginError> {
     let new_ctx = Context {
-        event: EventType::Onebot(event), // 移除 Arc
+        event: EventType::Onebot(event),
         config: ctx.config.clone(),
         config_save_lock: ctx.config_save_lock.clone(),
         db: ctx.db.clone(),

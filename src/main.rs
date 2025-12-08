@@ -5,7 +5,6 @@ mod db;
 mod event;
 #[macro_use]
 mod log;
-mod browser;
 mod matcher;
 mod message;
 mod plugins;
@@ -217,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = db.close().await;
 
     // 清理浏览器资源
-    browser::Browser::shutdown_global().await;
+    cdp_html_shot::Browser::shutdown_global().await;
 
     // 退出前强制再保存一次配置，确保万无一失
     let config_snapshot = if let Ok(guard) = shared_config.read() {
