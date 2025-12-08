@@ -30,12 +30,6 @@ pub struct Plugin {
 static PLUGINS: OnceLock<Vec<Plugin>> = OnceLock::new();
 
 /// 插件注册宏
-///
-/// 使用方法：
-/// register_plugins!(
-///     插件名1,
-///     插件名2 { 属性: 值 }, // 支持覆盖 on_init, on_connected 等
-/// );
 macro_rules! register_plugins {
     (
         $(
@@ -95,7 +89,10 @@ register_plugins!(
     },
     card_reader,
     gif_lab,
-    image_splitter
+    image_splitter,
+    ciyi {
+        on_init: Some(ciyi::init)
+    }
 );
 
 pub fn register_plugins() -> &'static [Plugin] {
