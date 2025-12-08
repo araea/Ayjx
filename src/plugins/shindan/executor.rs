@@ -100,6 +100,18 @@ pub async fn handle_shindan_exec(
         unreachable!("Should use run_specific_shindan for non-random");
     };
 
+    if config.random_return_command {
+        let msg_evt = ctx.as_message().unwrap();
+        let mut msg = Message::new();
+        msg = msg.reply(msg_evt.message_id()).text(&shindan.command);
+        match send_msg(ctx, writer.clone(), msg_evt.group_id(), None, msg).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(e));
+            }
+        }
+    }
+
     execute_shindan(ctx, writer, shindan, params, args, domain, storage, config).await
 }
 
@@ -131,7 +143,7 @@ async fn execute_shindan(
     args: &[OwnedValue],
     domain: ShindanDomain,
     storage: &Storage,
-    config: &PluginConfig,
+    _config: &PluginConfig,
 ) -> Result<()> {
     // 1. 确定名字
     let msg_evt = ctx.as_message().unwrap();
@@ -158,12 +170,7 @@ async fn execute_shindan(
         match fetch_segments(domain, &shindan.id, &target_name).await {
             Ok(segments) => {
                 let mut msg = Message::new();
-                if config.random_return_command {
-                    msg = msg
-                        .at(sender_id)
-                        .text(format!("\n『{}』\n", shindan.command));
-                }
-
+                msg = msg.reply(msg_evt.message_id());
                 // Convert segments
                 for seg in segments.0 {
                     match seg.type_.as_str() {
@@ -191,24 +198,6 @@ async fn execute_shindan(
             }
         }
     } else {
-        if config.random_return_command {
-            let mut msg = Message::new();
-            msg = msg.reply(msg_evt.message_id()).text(&shindan.command);
-            match send_msg(
-                ctx,
-                writer.clone(),
-                msg_evt.group_id(),
-                Some(sender_id),
-                msg,
-            )
-            .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e));
-                }
-            }
-        }
         // Image Mode
         match fetch_html(domain, &shindan.id, &target_name).await {
             Ok(html) => {
