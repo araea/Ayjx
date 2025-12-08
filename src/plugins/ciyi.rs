@@ -58,7 +58,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             crate::warn!(target: "Plugin/CiYi", "Init index error: {}", e);
         }
 
-        crate::info!(target: "Plugin/CiYi", "词意游戏初始化完成 (SQL)");
+        // crate::info!(target: "Plugin/CiYi", "词意游戏初始化完成 (SQL)");
         Ok(())
     })
 }
