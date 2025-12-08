@@ -28,7 +28,6 @@ pub struct ChannelConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub enabled: bool,
-    pub only_at: bool,
     pub max_height: u32,
     pub timeout_seconds: u64,
     pub quality: u8,
@@ -42,7 +41,6 @@ pub struct Config {
 pub fn default_config() -> Value {
     build_config(Config {
         enabled: true,
-        only_at: false,
         max_height: 5000,
         timeout_seconds: 30,
         quality: 80,
@@ -186,40 +184,24 @@ pub fn handle(
             return Ok(Some(ctx));
         }
 
-        // 检查 Only At 逻辑
-        if config.only_at {
-            // 需要检查消息链的第一个元素是否为 At 机器人
-            let is_at_me = if let crate::event::EventType::Onebot(event) = &ctx.event {
-                if let Some(arr) = event.get_array("message") {
-                    arr.first().is_some_and(|seg| {
-                        if seg.get_str("type") == Some("at") {
-                            let qq_str =
-                                seg.get("data").and_then(|d| d.get_str("qq")).unwrap_or("");
-                            let qq_int = seg
-                                .get("data")
-                                .and_then(|d| d.get_i64("qq").or(d.get_u64("qq").map(|u| u as i64)))
-                                .unwrap_or(0);
-
-                            qq_str == ctx.bot.login_user.id || qq_int == self_id
-                        } else {
-                            false
-                        }
-                    })
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if !is_at_me {
-                return Ok(Some(ctx));
-            }
-        }
-
         // 提取 URL
-        let text = msg_event.text();
-        if let Some(url) = extract_url(text) {
+        let url_candidate = if let crate::event::EventType::Onebot(event) = &ctx.event {
+            if let Some(arr) = event.get_array("message") {
+                arr.iter()
+                    .filter(|seg| seg.get_str("type") == Some("text"))
+                    .find_map(|seg| {
+                        seg.get("data")
+                            .and_then(|d| d.get_str("text"))
+                            .and_then(extract_url)
+                    })
+            } else {
+                extract_url(msg_event.text())
+            }
+        } else {
+            extract_url(msg_event.text())
+        };
+
+        if let Some(url) = url_candidate {
             // 检查域名屏蔽
             for ignore in &config.ignore_domains {
                 if url.contains(ignore) {

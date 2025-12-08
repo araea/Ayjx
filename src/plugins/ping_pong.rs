@@ -100,20 +100,6 @@ pub fn handle(
 
             send_msg(&ctx, writer.clone(), group_id, Some(user_id), reply_msg).await?;
 
-            // 发送合并转发消息
-            let node1 = Message::new().text("系统日志：收到心跳检测请求");
-            let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID: {}", count));
-            let node3 = Message::new()
-                .text("这是一个自定义合并转发消息的示例。")
-                .image("https://www.sea-ql.org/SeaORM/img/SeaORM%20banner.png");
-
-            let forward_msg = Message::new()
-                .node_custom(10000, "System Bot", node1)
-                .node_custom(10000, "Database", node2)
-                .node_custom(user_id, "User Context", node3);
-
-            send_msg(&ctx, writer, group_id, Some(user_id), forward_msg).await?;
-
             return Ok(None);
         }
 
