@@ -1,6 +1,7 @@
 use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::config::build_config;
+use crate::db::queries;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
@@ -20,7 +21,6 @@ mod chart;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StatsConfig {
     pub enabled: bool,
-    // 将字体路径改为字体族名称配置
     #[serde(default = "default_font_family")]
     pub font_family: String,
     #[serde(default = "default_width")]
@@ -37,7 +37,6 @@ pub struct StatsConfig {
 }
 
 fn default_font_family() -> String {
-    // 默认使用 Noto Sans CJK SC
     "Noto Sans CJK SC".to_string()
 }
 
@@ -229,6 +228,22 @@ pub fn on_connected(
             move |c, w, gid| async move {
                 let date_str = Local::now().format("%Y-%m-%d").to_string();
                 let (start, end) = get_time_range("今日");
+
+                // 0. 预检查：判断该群今日是否有消息
+                // 如果是冷门群组（无消息），直接跳过
+                let count =
+                    match queries::get_message_count(&c.db, Some(gid), None, start, end).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(target: "Plugin/Stats", "查询群 {} 消息记录失败: {}", gid, e);
+                            0
+                        }
+                    };
+
+                if count == 0 {
+                    info!(target: "Plugin/Stats", "群 [{}] 今日无消息，跳过推送。", gid);
+                    return;
+                }
 
                 // 1. 发送提示文本
                 info!(target: "Plugin/Stats", "正在推送群 [{}] 日报...", gid);

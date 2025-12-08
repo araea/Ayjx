@@ -1,8 +1,8 @@
 use crate::plugins::recorder::entity::{self, Entity as MessageLogs};
 use sea_orm::sea_query::{Alias, Expr, Func, SimpleExpr};
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
-    QuerySelect,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect,
 };
 
 // ================= 常量定义 =================
@@ -487,4 +487,26 @@ pub async fn get_message_type_stats(
         anim_emoji: 0,
         face: 0,
     }))
+}
+
+/// 获取指定条件下的消息数量
+pub async fn get_message_count(
+    db: &DatabaseConnection,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    start_time: i64,
+    end_time: i64,
+) -> Result<u64, DbErr> {
+    let mut query = MessageLogs::find()
+        .filter(entity::Column::Time.gte(start_time))
+        .filter(entity::Column::Time.lt(end_time));
+
+    if let Some(gid) = group_id {
+        query = query.filter(entity::Column::GroupId.eq(gid));
+    }
+    if let Some(uid) = user_id {
+        query = query.filter(entity::Column::UserId.eq(uid));
+    }
+
+    query.count(db).await
 }
