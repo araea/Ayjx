@@ -11,22 +11,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::fs;
 use toml::Value;
 
-pub mod card_reader;
-pub mod echo;
-pub mod filter_meta_event;
-pub mod gif_lab;
-pub mod group_self_title;
-pub mod image_splitter;
-pub mod logger;
-pub mod media_transfer;
-pub mod ping_pong;
-pub mod recall;
-pub mod recorder;
-pub mod repeater;
-pub mod stats_visualizer;
-pub mod sticker_saver;
-pub mod word_cloud;
-
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
 
 pub type PluginHandler =
@@ -45,119 +29,74 @@ pub struct Plugin {
 
 static PLUGINS: OnceLock<Vec<Plugin>> = OnceLock::new();
 
-/// 获取全局插件列表
-pub fn get_plugins() -> &'static [Plugin] {
-    PLUGINS.get_or_init(|| {
-        vec![
-            Plugin {
-                name: "filter_meta_event",
-                handler: filter_meta_event::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: filter_meta_event::default_config,
-            },
-            Plugin {
-                name: "logger",
-                handler: logger::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: logger::default_config,
-            },
-            Plugin {
-                name: "recorder",
-                handler: recorder::handle,
-                on_init: Some(recorder::init),
-                on_connected: None,
-                default_config: recorder::default_config,
-            },
-            Plugin {
-                name: "media_transfer",
-                handler: media_transfer::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: media_transfer::default_config,
-            },
-            Plugin {
-                name: "sticker_saver",
-                handler: sticker_saver::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: sticker_saver::default_config,
-            },
-            Plugin {
-                name: "group_self_title",
-                handler: group_self_title::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: group_self_title::default_config,
-            },
-            Plugin {
-                name: "ping_pong",
-                handler: ping_pong::handle,
-                on_init: Some(ping_pong::init),
-                on_connected: None,
-                default_config: ping_pong::default_config,
-            },
-            Plugin {
-                name: "recall",
-                handler: recall::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: recall::default_config,
-            },
-            Plugin {
-                name: "echo",
-                handler: echo::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: echo::default_config,
-            },
-            Plugin {
-                name: "repeater",
-                handler: repeater::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: repeater::default_config,
-            },
-            Plugin {
-                name: "word_cloud",
-                handler: word_cloud::handle,
-                on_init: None,
-                // 将 on_connected 置空，每日推送逻辑已移交至 stats_visualizer
-                on_connected: None,
-                default_config: word_cloud::default_config,
-            },
-            Plugin {
-                name: "stats_visualizer",
-                handler: stats_visualizer::handle,
-                on_init: None,
-                on_connected: Some(stats_visualizer::on_connected),
-                default_config: stats_visualizer::default_config,
-            },
-            Plugin {
-                name: "card_reader",
-                handler: card_reader::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: card_reader::default_config,
-            },
-            Plugin {
-                name: "gif_lab",
-                handler: gif_lab::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: gif_lab::default_config,
-            },
-            Plugin {
-                name: "image_splitter",
-                handler: image_splitter::handle,
-                on_init: None,
-                on_connected: None,
-                default_config: image_splitter::default_config,
-            },
-        ]
-    })
+/// 插件注册宏
+///
+/// 使用方法：
+/// register_plugins!(
+///     插件名1,
+///     插件名2 { 属性: 值 }, // 支持覆盖 on_init, on_connected 等
+/// );
+macro_rules! register_plugins {
+    (
+        $(
+            $module:ident $( { $($key:ident : $val:expr),* } )?
+        ),* $(,)?
+    ) => {
+        // 1. 自动生成模块声明 (无需手动 pub mod)
+        $( pub mod $module; )*
+
+        // 2. 生成获取插件列表的函数
+        pub fn get_plugins() -> &'static [Plugin] {
+            PLUGINS.get_or_init(|| {
+                vec![
+                    $(
+                        {
+                            // 默认构造
+                            #[allow(unused)]
+                            let mut p = Plugin {
+                                name: stringify!($module),
+                                handler: $module::handle,
+                                on_init: None,
+                                on_connected: None,
+                                default_config: $module::default_config,
+                            };
+                            // 应用自定义覆盖 (如果有)
+                            $(
+                                $( p.$key = $val; )*
+                            )?
+                            p
+                        }
+                    ),*
+                ]
+            })
+        }
+    };
 }
+
+//在此处注册所有插件
+register_plugins!(
+    filter_meta_event,
+    logger,
+    recorder {
+        on_init: Some(recorder::init)
+    },
+    media_transfer,
+    sticker_saver,
+    group_self_title,
+    ping_pong {
+        on_init: Some(ping_pong::init)
+    },
+    recall,
+    echo,
+    repeater,
+    word_cloud,
+    stats_visualizer {
+        on_connected: Some(stats_visualizer::on_connected)
+    },
+    card_reader,
+    gif_lab,
+    image_splitter
+);
 
 pub fn register_plugins() -> &'static [Plugin] {
     get_plugins()

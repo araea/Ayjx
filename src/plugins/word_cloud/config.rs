@@ -13,6 +13,8 @@ pub struct WordCloudConfig {
     pub height: u32,
     #[serde(default)]
     pub font_path: Option<String>,
+    #[serde(default)]
+    pub font_family: Option<String>,
     #[serde(default = "default_max_msg")]
     pub max_msg: usize,
 }
@@ -40,6 +42,7 @@ pub fn default_config() -> Value {
         width: 800,
         height: 600,
         font_path: None,
+        font_family: None,
         max_msg: 50000,
     })
 }

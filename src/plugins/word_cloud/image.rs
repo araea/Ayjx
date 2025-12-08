@@ -2,6 +2,10 @@ use super::stopwords::get_stop_words;
 use crate::info;
 use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
+use font_kit::family_name::FamilyName;
+use font_kit::handle::Handle;
+use font_kit::properties::Properties;
+use font_kit::source::SystemSource;
 use image::{GenericImageView, ImageFormat};
 use rand::Rng;
 use std::collections::HashMap;
@@ -11,6 +15,7 @@ use std::time::Instant;
 pub fn generate_word_cloud(
     corpus: Vec<String>,
     font_path: Option<String>,
+    font_family: Option<String>,
     limit: usize,
     width: u32,
     height: u32,
@@ -54,6 +59,7 @@ pub fn generate_word_cloud(
         .size(width, height)
         .seed(rng.random());
 
+    // 字体加载逻辑：路径优先，其次是 Family Name
     if let Some(path) = font_path {
         match std::fs::read(&path) {
             Ok(font_data) => {
@@ -61,6 +67,15 @@ pub fn generate_word_cloud(
             }
             Err(e) => {
                 return Err(format!("加载字体文件失败: {} - {}", path, e));
+            }
+        }
+    } else if let Some(family) = font_family {
+        match load_font_by_family(&family) {
+            Ok(font_data) => {
+                builder = builder.font(font_data);
+            }
+            Err(e) => {
+                return Err(format!("加载系统字体失败 [{}]: {}", family, e));
             }
         }
     }
@@ -134,4 +149,22 @@ pub fn generate_word_cloud(
     info!(target: "Plugin/WordCloud", "Generated & Cropped in {:?}", start.elapsed());
 
     Ok(format!("base64://{}", b64_str))
+}
+
+/// 使用 font-kit 根据 family name 加载字体数据
+fn load_font_by_family(family: &str) -> Result<Vec<u8>, String> {
+    let source = SystemSource::new();
+    let props = Properties::new();
+    let family_names = [FamilyName::Title(family.to_string()), FamilyName::SansSerif];
+
+    let handle = source
+        .select_best_match(&family_names, &props)
+        .map_err(|e| format!("Font selection error: {}", e))?;
+
+    match handle {
+        Handle::Path { path, .. } => {
+            std::fs::read(&path).map_err(|e| format!("Read font file error {:?}: {}", path, e))
+        }
+        Handle::Memory { bytes, .. } => Ok(bytes.to_vec()),
+    }
 }
