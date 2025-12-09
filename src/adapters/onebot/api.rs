@@ -347,3 +347,27 @@ pub async fn upload_file(
     call_action::<_, simd_json::OwnedValue>(ctx, writer, action, params).await?;
     Ok(())
 }
+
+// --- set_msg_emoji_like ---
+
+#[derive(Serialize)]
+struct SetMsgEmojiLikeParams {
+    message_id: i32,
+    emoji_id: i64,
+    set: bool,
+}
+
+pub async fn set_msg_emoji_like(
+    ctx: &Context,
+    writer: LockedWriter,
+    message_id: i32,
+    emoji_id: i64,
+    set: bool,
+) -> Result<(), ApiError> {
+    let params = SetMsgEmojiLikeParams {
+        message_id,
+        emoji_id,
+        set,
+    };
+    call_action_no_wait(ctx, writer, "set_msg_emoji_like", params).await
+}

@@ -40,3 +40,8 @@ base64 = "0.22"
 chrono = "0.4"
 rand = "0.9"
 shindan-maker = { version = "0.1", features = ["full"] }
+
+
+
+pulldown-cmark = "0.13"
+async-openai = { version = "0.31", features = ["_api","model","chat-completion-types","chat-completion"] }

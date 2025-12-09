@@ -95,7 +95,10 @@ register_plugins!(
     web_shot,
     shindan {
         on_init: Some(shindan::init)
-    }
+    },
+    oai {
+        on_init: Some(oai::init)
+    },
 );
 
 pub fn register_plugins() -> &'static [Plugin] {
