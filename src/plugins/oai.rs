@@ -4,6 +4,7 @@ use crate::event::Context;
 use crate::plugins::{PluginError, get_data_dir};
 use crate::{error, info, warn};
 use futures_util::future::BoxFuture;
+use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 
 use std::sync::Arc;
 use toml::Value;
@@ -45,6 +46,57 @@ pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     })
 }
 
+// 提取纯文本内容，自动忽略头部的 At 和 Reply 消息段
+fn extract_clean_text(ctx: &Context) -> Option<String> {
+    let event = match &ctx.event {
+        crate::event::EventType::Onebot(e) => e,
+        _ => return None,
+    };
+
+    if event.get_str("post_type")? != "message" {
+        return None;
+    }
+
+    let arr = event.get_array("message")?;
+    let mut text_acc = String::new();
+    let mut found_start = false;
+
+    for seg in arr {
+        let type_ = seg.get_str("type")?;
+
+        if !found_start {
+            // 跳过头部的 at 和 reply
+            if type_ == "at" || type_ == "reply" {
+                continue;
+            }
+            // 如果是文本，检查是否为空白
+            if type_ == "text" {
+                let data = seg.get("data")?;
+                let t = data.get_str("text").unwrap_or("");
+                let trimmed = t.trim_start();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // 找到有效文本起点
+                found_start = true;
+                text_acc.push_str(trimmed);
+            } else {
+                // 遇到非文本（如图片），视为内容开始，停止跳过
+                found_start = true;
+            }
+        } else if type_ == "text" {
+            let t = seg.get("data")?.get_str("text").unwrap_or("");
+            text_acc.push_str(t);
+        }
+    }
+
+    if text_acc.is_empty() {
+        None
+    } else {
+        Some(text_acc)
+    }
+}
+
 pub fn handle(
     ctx: Context,
     writer: LockedWriter,
@@ -59,9 +111,9 @@ pub fn handle(
             }
         };
 
-        // 获取纯文本内容
-        let raw_text = match ctx.as_message() {
-            Some(msg) => msg.text().to_string(),
+        // 获取纯文本内容 (使用新的提取逻辑)
+        let raw_text = match extract_clean_text(&ctx) {
+            Some(t) => t,
             None => return Ok(Some(ctx)),
         };
 
