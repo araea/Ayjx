@@ -759,15 +759,21 @@ pub async fn execute(
             }
         }
         Action::ListModels => {
-            let c = mgr.config.read().await;
-            if c.models.is_empty() {
-                drop(c);
-                reply_text(ctx, writer, &msg_event, "⏳ 正在获取模型列表...").await;
-                if let Err(e) = mgr.fetch_models().await {
-                    reply_text(ctx, writer, &msg_event, format!("❌ 获取失败: {}", e)).await;
-                    return;
-                }
+            // 每次查看都强制刷新，确保能获取最新模型
+            // 先发送提示，避免 API 响应慢导致用户以为无反应
+            reply_text(ctx, writer, &msg_event, "⏳ 正在刷新模型列表...").await;
+
+            // 尝试获取，如果失败则仅提示警告，后续继续尝试展示缓存
+            if let Err(e) = mgr.fetch_models().await {
+                reply_text(
+                    ctx,
+                    writer,
+                    &msg_event,
+                    format!("⚠️ 刷新失败，将展示缓存列表: {}", e),
+                )
+                .await;
             }
+
             let c = mgr.config.read().await;
             let models = &c.models;
             if models.is_empty() {

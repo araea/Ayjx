@@ -19,9 +19,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 // =============================
 
 /// 帮助信息
-const HELP_TEXT: &str = r#"🎬 GIF 实验室 - 帮助
-
-📝 指令列表 (大小写均可):
+const HELP_TEXT: &str = r#"📝 指令列表 (大小写均可):
 
 • gif帮助 / gifhelp - 显示本帮助
 • 合成gif [行x列] [间隔秒] [边距]

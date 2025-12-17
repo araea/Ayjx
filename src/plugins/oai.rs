@@ -9,7 +9,6 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjec
 use std::sync::Arc;
 use toml::Value;
 
-// 引入子模块
 pub mod data;
 pub mod logic;
 pub mod parser;
@@ -111,7 +110,7 @@ pub fn handle(
             }
         };
 
-        // 获取纯文本内容 (使用新的提取逻辑)
+        // 获取纯文本内容
         let raw_text = match extract_clean_text(&ctx) {
             Some(t) => t,
             None => return Ok(Some(ctx)),
