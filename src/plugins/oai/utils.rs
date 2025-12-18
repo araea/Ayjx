@@ -12,7 +12,14 @@ pub static RE_API: OnceLock<Regex> = OnceLock::new();
 pub static RE_IDX: OnceLock<Regex> = OnceLock::new();
 
 pub const MODEL_KEYWORDS: &[&str] = &[
-    "gpt-5", "claude", "gemini-3", "deepseek", "kimi", "grok-4", "banana", "sora-2",
+    "gpt-5.2",
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "gemini-3",
+    "grok-4",
+    "banana",
+    "sora-2",
 ];
 
 pub fn normalize(s: &str) -> String {
@@ -223,53 +230,55 @@ pub async fn get_full_content(
     if let Some(reply) = message_arr
         .iter()
         .find(|s| s.get_str("type") == Some("reply"))
-        && let Some(data) = reply.get("data") {
-            let id_str_opt: Option<String> = match data.get_str("id") {
-                Some(s) => Some(s.to_string()),
-                None => data.get_i64("id").map(|i| i.to_string()),
-            };
-            if let Some(id_str) = id_str_opt
-                && let Ok(id) = id_str.parse::<i32>()
-                    && let Ok(ret) = api::get_msg(ctx, writer.clone(), id).await {
-                        let mut temp_text = String::new();
-                        // 这里 Message 结构体内部也是 Segment 列表
-                        for seg in &ret.message.0 {
-                            match seg.type_.as_str() {
-                                "text" => {
-                                    if let Some(t) = seg.data.get("text").and_then(|v| v.as_str()) {
-                                        temp_text.push_str(t);
-                                    }
-                                }
-                                "image" => {
-                                    if let Some(u) = seg.data.get("url").and_then(|v| v.as_str()) {
-                                        imgs.push(u.to_string());
-                                    }
-                                }
-                                "video" => {
-                                    let url = seg
-                                        .data
-                                        .get("url")
-                                        .or(seg.data.get("file"))
-                                        .and_then(|v| v.as_str());
-                                    if let Some(u) = url {
-                                        imgs.push(u.to_string());
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        let trimmed = temp_text.trim();
-                        if !trimmed.is_empty() {
-                            for line in trimmed.lines() {
-                                quote_text.push_str("> ");
-                                quote_text.push_str(line);
-                                quote_text.push('\n');
-                            }
-                            quote_text.push('\n');
+        && let Some(data) = reply.get("data")
+    {
+        let id_str_opt: Option<String> = match data.get_str("id") {
+            Some(s) => Some(s.to_string()),
+            None => data.get_i64("id").map(|i| i.to_string()),
+        };
+        if let Some(id_str) = id_str_opt
+            && let Ok(id) = id_str.parse::<i32>()
+            && let Ok(ret) = api::get_msg(ctx, writer.clone(), id).await
+        {
+            let mut temp_text = String::new();
+            // 这里 Message 结构体内部也是 Segment 列表
+            for seg in &ret.message.0 {
+                match seg.type_.as_str() {
+                    "text" => {
+                        if let Some(t) = seg.data.get("text").and_then(|v| v.as_str()) {
+                            temp_text.push_str(t);
                         }
                     }
+                    "image" => {
+                        if let Some(u) = seg.data.get("url").and_then(|v| v.as_str()) {
+                            imgs.push(u.to_string());
+                        }
+                    }
+                    "video" => {
+                        let url = seg
+                            .data
+                            .get("url")
+                            .or(seg.data.get("file"))
+                            .and_then(|v| v.as_str());
+                        if let Some(u) = url {
+                            imgs.push(u.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let trimmed = temp_text.trim();
+            if !trimmed.is_empty() {
+                for line in trimmed.lines() {
+                    quote_text.push_str("> ");
+                    quote_text.push_str(line);
+                    quote_text.push('\n');
+                }
+                quote_text.push('\n');
+            }
         }
+    }
 
     // 2. 提取当前消息内容
     let mut found_trigger = false;
@@ -302,19 +311,20 @@ pub async fn get_full_content(
             }
         } else if type_ == "at"
             && found_trigger
-                && let Some(d) = data {
-                    let qq = d
-                        .get_str("qq")
-                        .map(|s| s.to_string())
-                        .or_else(|| d.get_i64("qq").map(|i| i.to_string()))
-                        .or_else(|| d.get_u64("qq").map(|i| i.to_string()));
+            && let Some(d) = data
+        {
+            let qq = d
+                .get_str("qq")
+                .map(|s| s.to_string())
+                .or_else(|| d.get_i64("qq").map(|i| i.to_string()))
+                .or_else(|| d.get_u64("qq").map(|i| i.to_string()));
 
-                    if let Some(id) = qq
-                        && id != "all"
-                    {
-                        imgs.push(format!("https://q.qlogo.cn/g?b=qq&nk={}&s=640", id));
-                    }
-                }
+            if let Some(id) = qq
+                && id != "all"
+            {
+                imgs.push(format!("https://q.qlogo.cn/g?b=qq&nk={}&s=640", id));
+            }
+        }
     }
 
     (quote_text, imgs)
