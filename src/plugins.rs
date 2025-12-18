@@ -66,40 +66,8 @@ macro_rules! register_plugins {
     };
 }
 
-//在此处注册所有插件
-register_plugins!(
-    filter_meta_event,
-    logger,
-    recorder {
-        on_init: Some(recorder::init)
-    },
-    media_transfer,
-    sticker_saver,
-    group_self_title,
-    ping_pong {
-        on_init: Some(ping_pong::init)
-    },
-    recall,
-    echo,
-    repeater,
-    word_cloud,
-    stats_visualizer {
-        on_connected: Some(stats_visualizer::on_connected)
-    },
-    card_reader,
-    gif_lab,
-    image_splitter,
-    ciyi {
-        on_init: Some(ciyi::init)
-    },
-    web_shot,
-    shindan {
-        on_init: Some(shindan::init)
-    },
-    oai {
-        on_init: Some(oai::init)
-    },
-);
+// 引入单独的注册文件
+include!("./plugins/registry.rs");
 
 pub fn register_plugins() -> &'static [Plugin] {
     get_plugins()

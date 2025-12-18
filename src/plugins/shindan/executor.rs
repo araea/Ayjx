@@ -205,19 +205,24 @@ async fn execute_shindan(
                 let browser = Browser::instance().await;
                 let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?;
 
+                // 先设置初始视口并加载内容，确保布局初始化正确
+                tab.set_viewport(&Viewport::new(1200, 800)).await?;
+                tab.set_content(&html).await?;
+
+                // Check chart.js logic
+                if html.contains("chart.js") || html.contains("chartType") {
+                    time::sleep(Duration::from_secs(2)).await;
+                }
+
+                // 在内容加载后计算实际高度
                 let height_js =
                     "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)";
                 let page_height = tab.evaluate(height_js).await?.as_f64().unwrap_or(800.0) as u32;
 
-                let final_height = page_height.clamp(100, 5000);
-                // Viewport setup
+                // 根据实际高度调整视口，确保长图能被完整渲染
+                // 适当增加 max clamp (5000 -> 10000) 以适应超长结果
+                let final_height = (page_height + 100).clamp(100, 10000);
                 tab.set_viewport(&Viewport::new(1200, final_height)).await?;
-                tab.set_content(&html).await?;
-
-                // Check chart.js logic (from original)
-                if html.contains("chart.js") || html.contains("chartType") {
-                    time::sleep(Duration::from_secs(2)).await;
-                }
 
                 let elem = tab.find_element("#title_and_result").await?;
                 let b64 = elem.screenshot().await?;
