@@ -1,5 +1,3 @@
-use crate::error;
-use crate::info;
 use crate::plugins::get_data_dir;
 use sea_orm::ActiveValue::Set;
 use sea_orm::QuerySelect;

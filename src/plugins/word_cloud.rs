@@ -5,7 +5,6 @@ use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
-use crate::{error, info};
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use std::sync::OnceLock;

@@ -1,5 +1,4 @@
 use crate::adapters::onebot::{LockedWriter, send_msg};
-use crate::error;
 use crate::event::Context;
 use crate::message::Message;
 use anyhow::Result;

@@ -6,7 +6,6 @@ use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config, word_cloud};
-use crate::{info, warn};
 use chrono::Local;
 use futures_util::future::BoxFuture;
 use regex::Regex;

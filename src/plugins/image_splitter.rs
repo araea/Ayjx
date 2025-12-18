@@ -1,7 +1,6 @@
 use crate::adapters::onebot::{LockedWriter, api, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
-use crate::error;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};

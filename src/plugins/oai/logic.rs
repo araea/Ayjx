@@ -217,29 +217,38 @@ async fn chat(
     .iter()
     .any(|kw| model_lower.contains(kw));
 
-    if !agent.system_prompt.is_empty() {
-        if force_user_role_for_system {
-            msgs.push(
-                ChatCompletionRequestUserMessageArgs::default()
-                    .content(agent.system_prompt.clone())
-                    .build()
-                    .unwrap()
-                    .into(),
-            );
-        } else {
+    let mut pending_sys_prompt = if !agent.system_prompt.is_empty() {
+        Some(agent.system_prompt.clone())
+    } else {
+        None
+    };
+
+    if !force_user_role_for_system
+        && let Some(sp) = pending_sys_prompt.take() {
             msgs.push(
                 ChatCompletionRequestSystemMessageArgs::default()
-                    .content(agent.system_prompt.clone())
+                    .content(sp)
                     .build()
                     .unwrap()
                     .into(),
             );
         }
-    }
+
     let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
     for m in &hist {
         if m.role == "user" {
             let mut parts = Vec::new();
+
+            if let Some(sp) = pending_sys_prompt.take() {
+                parts.push(
+                    ChatCompletionRequestMessageContentPartTextArgs::default()
+                        .text(sp)
+                        .build()
+                        .unwrap()
+                        .into(),
+                );
+            }
+
             if !m.content.is_empty() {
                 parts.push(
                     ChatCompletionRequestMessageContentPartTextArgs::default()
@@ -298,6 +307,16 @@ async fn chat(
                 );
             }
         }
+    }
+
+    if let Some(sp) = pending_sys_prompt {
+        msgs.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(sp)
+                .build()
+                .unwrap()
+                .into(),
+        );
     }
 
     let req = match CreateChatCompletionRequestArgs::default()

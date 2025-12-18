@@ -1,6 +1,5 @@
 use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::config::build_config;
-use crate::error;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};

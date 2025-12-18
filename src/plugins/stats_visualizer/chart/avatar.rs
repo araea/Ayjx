@@ -1,7 +1,6 @@
 use super::data_loader::BarData;
 use super::utils::{create_default_avatar, get_average_color, make_circular_avatar};
 use crate::plugins::get_data_dir;
-use crate::warn;
 use image::RgbaImage;
 use image::imageops::FilterType;
 use std::path::PathBuf;

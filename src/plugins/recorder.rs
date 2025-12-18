@@ -2,7 +2,6 @@ use crate::adapters::onebot::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
-use crate::{error, info, warn};
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use futures_util::future::BoxFuture;
 use jieba_rs::Jieba;

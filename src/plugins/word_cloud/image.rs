@@ -1,5 +1,4 @@
 use super::stopwords::get_stop_words;
-use crate::info;
 use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
 use font_kit::family_name::FamilyName;

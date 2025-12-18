@@ -2,7 +2,6 @@ use crate::adapters::onebot::LockedWriter;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::plugins::{PluginError, get_data_dir};
-use crate::{error, info, warn};
 use futures_util::future::BoxFuture;
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 
