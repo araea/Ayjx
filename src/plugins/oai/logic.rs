@@ -208,14 +208,33 @@ async fn chat(
     let client = Client::with_config(OpenAIConfig::new().with_api_base(api.0).with_api_key(api.1));
     let mut msgs: Vec<ChatCompletionRequestMessage> = vec![];
 
+    let model_lower = agent.model.to_lowercase();
+    let force_user_role_for_system = [
+        "nano-banana",
+        "gemini-2.5-flash-image",
+        "gemini-3-pro-image",
+    ]
+    .iter()
+    .any(|kw| model_lower.contains(kw));
+
     if !agent.system_prompt.is_empty() {
-        msgs.push(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(agent.system_prompt.clone())
-                .build()
-                .unwrap()
-                .into(),
-        );
+        if force_user_role_for_system {
+            msgs.push(
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content(agent.system_prompt.clone())
+                    .build()
+                    .unwrap()
+                    .into(),
+            );
+        } else {
+            msgs.push(
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(agent.system_prompt.clone())
+                    .build()
+                    .unwrap()
+                    .into(),
+            );
+        }
     }
     let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
     for m in &hist {
