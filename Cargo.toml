@@ -23,11 +23,11 @@ md5 = "0.8"
 base64 = "0.22"
 
 # 网络与 HTTP
-reqwest = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "http2", "charset"] }
 http = "1.4"
 url = "2.5"
 tokio-tungstenite = "0.28"  # WebSocket
-async-openai = { version = "0.31", features = ["_api","model","chat-completion-types","chat-completion"] }  # OpenAI API
+async-openai = { version = "0.31", features = ["_api", "model", "chat-completion-types", "chat-completion"] }  # OpenAI API
 shindan-maker = { version = "0.1", features = ["full"] }  # 诊断生成器
 
 # 异步运行时与工具
@@ -35,12 +35,12 @@ tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
 # 数据库
-sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-native-tls", "macros" ] }
+sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
 
 # 图像处理与生成
 image = "0.25"
-plotters = "0.3"          # 图表绘制
-font-kit = "0.14"         # 字体处理
+plotters = { version = "0.3", default-features = false, features = ["all_elements", "all_series", "bitmap_backend", "bitmap_encoder", "bitmap_gif", "chrono", "colormaps", "deprecated_items", "full_palette", "image", "lazy_static", "pathfinder_geometry", "svg_backend", "ttf-parser"] }         # 图表绘制
+fontdb = "0.23"       # 字体处理
 araea-wordcloud = "0.1"   # 词云生成
 cdp-html-shot = "0.2"     # HTML 截图
 

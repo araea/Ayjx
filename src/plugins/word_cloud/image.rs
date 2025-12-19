@@ -1,15 +1,22 @@
 use super::stopwords::get_stop_words;
 use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
-use font_kit::family_name::FamilyName;
-use font_kit::handle::Handle;
-use font_kit::properties::Properties;
-use font_kit::source::SystemSource;
 use image::{GenericImageView, ImageFormat};
 use rand::Rng;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::OnceLock;
 use std::time::Instant;
+
+static FONT_DB: OnceLock<fontdb::Database> = OnceLock::new();
+
+fn get_font_db() -> &'static fontdb::Database {
+    FONT_DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts(); // 扫描系统字体
+        db
+    })
+}
 
 pub fn generate_word_cloud(
     corpus: Vec<String>,
@@ -28,7 +35,6 @@ pub fn generate_word_cloud(
         let words = line.split_whitespace();
         for w in words {
             let w_trim = w.trim();
-            // 过滤规则：长度>1，不在停用词表，非纯数字
             if w_trim.chars().count() > 1
                 && !stop_words.contains(w_trim)
                 && !w_trim
@@ -58,7 +64,7 @@ pub fn generate_word_cloud(
         .size(width, height)
         .seed(rng.random());
 
-    // 字体加载逻辑：路径优先，其次是 Family Name
+    // 字体加载逻辑
     if let Some(path) = font_path {
         match std::fs::read(&path) {
             Ok(font_data) => {
@@ -74,7 +80,7 @@ pub fn generate_word_cloud(
                 builder = builder.font(font_data);
             }
             Err(e) => {
-                return Err(format!("加载系统字体失败 [{}]: {}", family, e));
+                warn!(target: "Plugin/WordCloud", "加载系统字体 [{}] 失败: {}，将尝试默认方案", family, e);
             }
         }
     }
@@ -89,7 +95,6 @@ pub fn generate_word_cloud(
         .to_png(2.0)
         .map_err(|e| format!("PNG Encode Error: {}", e))?;
 
-    // 自动裁剪
     let img = image::load_from_memory(&png_data).map_err(|e| format!("Image Load Error: {}", e))?;
 
     let (img_w, img_h) = img.dimensions();
@@ -99,11 +104,9 @@ pub fn generate_word_cloud(
     let mut max_y = 0;
     let mut found_content = false;
 
-    // 扫描非白像素
     for y in 0..img_h {
         for x in 0..img_w {
             let pixel = img.get_pixel(x, y);
-            // 假设背景纯白 (255, 255, 255)，允许少量误差
             if pixel[0] < 250 || pixel[1] < 250 || pixel[2] < 250 {
                 if x < min_x {
                     min_x = x;
@@ -144,26 +147,26 @@ pub fn generate_word_cloud(
     };
 
     let b64_str = general_purpose::STANDARD.encode(&final_data);
-
     info!(target: "Plugin/WordCloud", "Generated & Cropped in {:?}", start.elapsed());
 
     Ok(format!("base64://{}", b64_str))
 }
 
-/// 使用 font-kit 根据 family name 加载字体数据
+/// 查找并读取字体数据
 fn load_font_by_family(family: &str) -> Result<Vec<u8>, String> {
-    let source = SystemSource::new();
-    let props = Properties::new();
-    let family_names = [FamilyName::Title(family.to_string()), FamilyName::SansSerif];
+    let db = get_font_db();
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family), fontdb::Family::SansSerif],
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    };
 
-    let handle = source
-        .select_best_match(&family_names, &props)
-        .map_err(|e| format!("Font selection error: {}", e))?;
+    let id = db
+        .query(&query)
+        .ok_or_else(|| format!("未找到匹配的字体族: {}", family))?;
 
-    match handle {
-        Handle::Path { path, .. } => {
-            std::fs::read(&path).map_err(|e| format!("Read font file error {:?}: {}", path, e))
-        }
-        Handle::Memory { bytes, .. } => Ok(bytes.to_vec()),
-    }
+    // with_face_data 会自动处理文件 IO 或内存引用，并返回闭包的结果
+    db.with_face_data(id, |data, _face_index| data.to_vec())
+        .ok_or_else(|| "无法获取字体数据".to_string())
 }
