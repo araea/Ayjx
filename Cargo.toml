@@ -4,34 +4,46 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# 错误处理
 anyhow = "1.0"
 
-jieba-rs = "0.8"
-md5 = "0.8"
-regex = "1.12"
+# 文本处理
+jieba-rs = "0.8"      # 中文分词
+regex = "1.12"        # 正则表达式
+pulldown-cmark = "0.13" # Markdown 解析
+
+# 序列化与反序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 simd-json = "0.17"
 toml = "0.9"
-url = "2.5"
 
+# 加密与哈希
+md5 = "0.8"
+base64 = "0.22"
+
+# 网络与 HTTP
 reqwest = "0.12"
 http = "1.4"
-tokio-tungstenite = "0.28"
+url = "2.5"
+tokio-tungstenite = "0.28"  # WebSocket
+async-openai = { version = "0.31", features = ["_api","model","chat-completion-types","chat-completion"] }  # OpenAI API
+shindan-maker = { version = "0.1", features = ["full"] }  # 诊断生成器
 
+# 异步运行时与工具
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
+# 数据库
 sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-native-tls", "macros" ] }
-araea-wordcloud = "0.1"
-cdp-html-shot = "0.2"
-font-kit = "0.14"
-image = "0.25"
-plotters = "0.3"
 
-base64 = "0.22"
+# 图像处理与生成
+image = "0.25"
+plotters = "0.3"          # 图表绘制
+font-kit = "0.14"         # 字体处理
+araea-wordcloud = "0.1"   # 词云生成
+cdp-html-shot = "0.2"     # HTML 截图
+
+# 时间与随机数
 chrono = "0.4"
 rand = "0.9"
-shindan-maker = { version = "0.1", features = ["full"] }
-pulldown-cmark = "0.13"
-async-openai = { version = "0.31", features = ["_api","model","chat-completion-types","chat-completion"] }
