@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 
-# Text processing and parsing
 jieba-rs = "0.8"
 md5 = "0.8"
 regex = "1.12"
@@ -16,32 +15,23 @@ simd-json = "0.17"
 toml = "0.9"
 url = "2.5"
 
-# Web and HTTP clients
 reqwest = "0.12"
 http = "1.4"
 tokio-tungstenite = "0.28"
 
-# Async runtime and utilities
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
-# Database ORM
 sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-native-tls", "macros" ] }
-
-# Graphics and visualization
 araea-wordcloud = "0.1"
 cdp-html-shot = "0.2"
 font-kit = "0.14"
 image = "0.25"
 plotters = "0.3"
 
-# Utilities
 base64 = "0.22"
 chrono = "0.4"
 rand = "0.9"
 shindan-maker = { version = "0.1", features = ["full"] }
-
-
-
 pulldown-cmark = "0.13"
 async-openai = { version = "0.31", features = ["_api","model","chat-completion-types","chat-completion"] }
